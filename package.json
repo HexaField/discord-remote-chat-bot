@@ -1,0 +1,31 @@
+{
+  "name": "discord-remote-chat-bot",
+  "version": "0.1.0",
+  "description": "Minimal Discord bot that sends JSON prompts to an LLM via HTTP and returns JSON responses (TypeScript)",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
+    "lint": "eslint . --ext .ts",
+    "test": "vitest run"
+  },
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "discord.js": "^14.13.0",
+    "dotenv": "^16.3.1",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.2",
+    "ts-node-dev": "^2.0.0",
+    "@types/node": "^20.4.2",
+    "eslint": "^8.47.0",
+    "vitest": "^1.2.1",
+    "cross-fetch": "^3.1.8"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
