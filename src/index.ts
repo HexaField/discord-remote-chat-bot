@@ -3,17 +3,14 @@ import {
   Client,
   GatewayIntentBits,
   Partials,
-  Message,
   Interaction,
   ChatInputCommandInteraction,
   ApplicationCommandDataResolvable,
 } from "discord.js";
-import { callLLM, LLMRequest, LLMResponse } from "./llm";
-import { loadCsvFromUrl, loadCsvFromFile } from "./csv";
-import { askWithCsv } from "./askService";
-import appRoot from "app-root-path";
+import * as appRoot from "app-root-path";
 import path from "path";
 import fs from "fs/promises";
+import { callLLM } from "./llm";
 
 const DISCORD_TOKEN: string | undefined = process.env.DISCORD_TOKEN;
 const LLM_URL: string | undefined = process.env.LLM_URL;
@@ -46,121 +43,38 @@ client.once("ready", async () => {
     // Register a simple guild-scoped command if GUILD_ID provided
     const guildId = process.env.GUILD_ID;
     if (guildId && client.application?.commands) {
-      const body: ApplicationCommandDataResolvable = {
-        name: "json",
-        description: "Send a JSON command to the LLM",
+      // Register /reflect command with a single `query` option
+      const reflectBody: ApplicationCommandDataResolvable = {
+        name: "reflect",
+        description: "Reflect on a question",
         options: [
           {
-            name: "payload",
-            description: "JSON payload for LLM",
+            name: "query",
+            description: "Your question",
             type: 3, // STRING
             required: true,
           },
         ],
       };
-      await client.application.commands.create(body, guildId as string);
-      console.log("Registered /json command in guild", guildId);
-      // Register /ask in the same guild
-      const askBody: ApplicationCommandDataResolvable = {
-        name: "ask",
-        description: "Ask a question about a CSV dataset",
-        options: [
-          {
-            name: "query",
-            description: "Your question",
-            type: 3,
-            required: true,
-          },
-          // {
-          //   name: "csv_url",
-          //   description: "Optional CSV URL",
-          //   type: 3,
-          //   required: false,
-          // },
-        ],
-      };
-      await client.application.commands.create(askBody, guildId as string);
-      console.log("Registered /ask command in guild", guildId);
+      await client.application.commands.set([reflectBody], guildId as string);
+      console.log("Registered /reflect command in guild", guildId);
     }
   } catch (err) {
     console.warn("Failed to register commands", err);
   }
 });
 
-// Simple prefix command: !json <json>
-client.on("messageCreate", async (message: Message) => {
-  try {
-    if (message.author.bot) return;
-    // message.content can be empty/undefined if MessageContent intent is not enabled.
-    const content = (message.content ?? "").trim();
-    if (!content.startsWith("!json")) return;
-
-    const arg = content.slice("!json".length).trim();
-    if (!arg)
-      return message.reply('Usage: `!json {"command":"name","params":{...}}`');
-
-    let req: LLMRequest;
-    try {
-      req = JSON.parse(arg) as LLMRequest;
-    } catch (e) {
-      return message.reply("Invalid JSON. Make sure you pass a JSON object.");
-    }
-
-    // Narrow channel to text-based before using sendTyping
-    // isTextBased is a runtime type guard; check and call safely
-    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-    // @ts-ignore -- sendTyping is available on text-based channels
-    if (
-      typeof (message.channel as any).isTextBased === "function"
-        ? (message.channel as any).isTextBased()
-        : false
-    ) {
-      // call sendTyping
-      // @ts-ignore
-      await message.channel.sendTyping();
-    }
-    const resp = await callLLM<any>(LLM_URL!, LLM_API_KEY, req);
-
-    if (!resp.success) {
-      return message.reply(`LLM error: ${resp.error}`);
-    }
-
-    // Return the JSON response as a single code block message
-    return message.reply(
-      "```json\n" + JSON.stringify(resp.data, null, 2) + "\n```"
-    );
-  } catch (err: any) {
-    console.error("Handler error", err);
-    message.reply("Internal error");
-  }
-});
+// We no longer expose a free-text prefix command. Interactions only.
 
 // Handle slash commands
 client.on("interactionCreate", async (interaction: Interaction) => {
   if (!interaction.isChatInputCommand()) return;
   const chat = interaction as ChatInputCommandInteraction;
 
-  // /json existing handler
-  if (chat.commandName === "json") {
-    const payload = chat.options.getString("payload", true);
-    let parsed: any;
-    try {
-      parsed = JSON.parse(payload);
-    } catch (e) {
-      return chat.reply({ content: "Invalid JSON payload.", ephemeral: true });
-    }
-    await chat.deferReply();
-    const resp = await callLLM<any>(LLM_URL!, LLM_API_KEY, parsed);
-    if (!resp.success) return chat.editReply(`LLM error: ${resp.error}`);
-    return chat.editReply(
-      "```json\n" + JSON.stringify(resp.data, null, 2) + "\n```"
-    );
-  }
-
-  // /ask handler
-  if (chat.commandName === "ask") {
-    const askChannel = process.env.ASK_CHANNEL_ID;
-    if (askChannel && chat.channelId !== askChannel) {
+  // /reflect handler: single `query` parameter, no CSV support
+  if (chat.commandName === "reflect") {
+    const reflectChannel = process.env.CHANNEL_ID;
+    if (reflectChannel && chat.channelId !== reflectChannel) {
       return chat.reply({
         content: "This command can only be used in a designated channel.",
         ephemeral: true,
@@ -168,43 +82,37 @@ client.on("interactionCreate", async (interaction: Interaction) => {
     }
 
     const query = chat.options.getString("query", true);
-    // const csvUrl = chat.options.getString("csv_url", false);
-
-    // Determine CSV source
-    const csvPath = process.env.CSV_PATH;
-    const maxRows = Number(process.env.MAX_CSV_ROWS ?? "50");
 
     await chat.deferReply();
 
-    try {
-      let table;
-      // if (csvUrl) {
-      //   table = await loadCsvFromUrl(csvUrl, maxRows);
-      // } else
-      if (csvPath) {
-        const root = appRoot.path;
-        const absPath = path.resolve(root, csvPath);
-        table = await fs.readFile(absPath, "utf-8");
-        // table = await loadCsvFromFile(csvPath, maxRows);
-      } else {
-        return chat.editReply({
-          content:
-            "No CSV provided. Please pass a `csv_url` or configure CSV_PATH in the environment.",
-        });
-      }
+    // Determine CSV source
+    const csvPath = process.env.CSV_PATH || "data/data.csv";
 
-      const resp = await askWithCsv(query, table, LLM_URL!, LLM_API_KEY);
+    const root = appRoot.path;
+    const absPath = path.resolve(root, csvPath);
+    const table = await fs.readFile(absPath, "utf-8");
+
+    try {
+      const systemPrompt = `
+You are an advanced AI assistant, designed to parse CSV data and answer user queries based on that data.
+
+Respond with just the string content requested.
+
+Here is the CSV data you will work with:
+
+${table}`;
+
+      const resp = await callLLM(systemPrompt, query);
       if (!resp.success) return chat.editReply(`LLM error: ${resp.error}`);
 
-      // Prefer structured answer if present
-      const ans = (resp.data && (resp.data.answer ?? resp.data)) || resp.data;
+      const ans = resp.data;
       const content =
         typeof ans === "string" ? ans : JSON.stringify(ans, null, 2);
-      return chat.editReply("" + content);
+      return chat.editReply(String(content));
     } catch (err: any) {
-      console.error("ask handler error", err);
+      console.error("reflect handler error", err);
       return chat.editReply({
-        content: `Error processing CSV or LLM: ${err?.message ?? String(err)}`,
+        content: `Error calling LLM: ${err?.message ?? String(err)}`,
       });
     }
   }

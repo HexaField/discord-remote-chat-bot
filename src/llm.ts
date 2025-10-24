@@ -1,110 +1,50 @@
-import { z } from "zod";
-import { debug, info } from "./logger";
+import { debug } from "./logger";
 import ollama from "ollama";
 
-export const LLMRequestSchema = z.object({
-  command: z.string(),
-  params: z.record(z.string(), z.unknown()).optional(),
-});
+const MODEL_MAX_CTX = 128000;
 
-export const LLMResponseSchema = <T extends z.ZodTypeAny>(dataSchema?: T) =>
-  z.object({
-    success: z.boolean(),
-    data: dataSchema ? dataSchema.optional() : z.any().optional(),
-    error: z.string().optional(),
-  });
-
-export type LLMRequest = z.infer<typeof LLMRequestSchema>;
 export type LLMResponse<T = unknown> = {
   success: boolean;
-  data?: T;
+  data?: string;
   error?: string;
 };
 
-async function fetchWithTimeout(
-  input: RequestInfo | URL,
-  init: RequestInit,
-  timeoutMs: number
-) {
-  const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetch(input, { ...init, signal: controller.signal });
-    clearTimeout(id);
-    return res;
-  } catch (err) {
-    clearTimeout(id);
-    throw err;
-  }
-}
-
-function wait(ms: number) {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
 export async function callLLM<T = unknown>(
-  url: string,
-  apiKey: string | undefined,
-  payload: LLMRequest,
-  timeoutMs = 20000,
-  maxRetries = 2
+  systemPrompt: string,
+  userQuery: string
 ): Promise<LLMResponse<T>> {
-  const parsed = LLMRequestSchema.safeParse(payload);
-  if (!parsed.success)
-    return { success: false, error: "Invalid LLM request payload" };
+  debug("LLM payload", userQuery);
 
-  let attempt = 0;
-  let lastError: string | undefined;
+  // Combine the prompts and call the Python tokenizer to count tokens.
+  const combinedText = `${systemPrompt}\n${userQuery}`;
 
-  while (attempt <= maxRetries) {
-    try {
-      // Log outgoing request in dev mode, but avoid printing the API key
+  const tokenCount = combinedText.length / 4; // Rough estimate: 1 token ~ 4 characters
 
-      const systemPrompt = `
-You are an advanced AI assistant, designed to parse CSV data and answer user queries based on that data.
-
-Respond with just the string content requested.
-
-Here is the CSV data you will work with:
-
-${parsed.data.params!.table}
-
-`;
-
-      debug("LLM payload", systemPrompt);
-
-      const response = await ollama.chat({
-        model: "llama3.2",
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: parsed.data.params!.query as string },
-        ],
-      });
-
-      debug("LLM response status", response);
-
-      // Try parsing JSON; if parsing fails, capture the text for debug
-      let json: unknown;
-      try {
-        json = JSON.parse(response.message.content);
-      } catch (e) {
-        json = response.message.content;
-      }
-
-      debug("LLM returned JSON:", json);
-
-      return {
-        success: true,
-        data: json as T,
-      };
-    } catch (err: any) {
-      lastError = err?.message ?? String(err);
-      // Retry on network errors / timeouts
-      attempt += 1;
-      if (attempt > maxRetries) break;
-      await wait(200 * attempt); // backoff
-    }
+  debug("LLM token count", tokenCount);
+  if (tokenCount > 0 && tokenCount > MODEL_MAX_CTX) {
+    // Log a visible warning for developers / operators.
+    console.warn(
+      `LLM prompt token count (${tokenCount}) exceeds model max context (${MODEL_MAX_CTX}). Prompt may be truncated or rejected.`
+    );
   }
 
-  return { success: false, error: lastError ?? "Unknown error" };
+  const response = await ollama.chat({
+    model: "llama3.2",
+    options: {
+      num_ctx: MODEL_MAX_CTX,
+    },
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userQuery },
+    ],
+  });
+
+  // debug("LLM response status", response);
+
+  const responseWithQuestion = `***${userQuery}***\n\n${response.message.content}`;
+
+  return {
+    success: true,
+    data: responseWithQuestion,
+  };
 }

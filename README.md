@@ -13,7 +13,7 @@ This small TypeScript project lets users in Discord ask a slash command `/ask` w
 - `GUILD_ID` (optional) — registers commands in a guild during startup.
 - `LLM_URL` (required) — HTTP endpoint for the LLM.
 - `LLM_API_KEY` (optional) — Bearer token for the LLM.
-- `ASK_CHANNEL_ID` (optional) — if set, only this channel may use `/ask`.
+- `CHANNEL_ID` (optional) — if set, only this channel may use `/ask`.
 - `CSV_PATH` (optional) — local CSV fallback if `csv_url` not provided.
 - `MAX_CSV_ROWS` (optional) — limit rows sent to the LLM (default 50).
 
