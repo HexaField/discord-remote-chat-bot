@@ -1,4 +1,4 @@
-# discord-remote-chat-bot
+# GuildBot
 
 A small TypeScript Discord bot that forwards structured JSON requests (e.g. CSV queries) to a remote LLM HTTP endpoint and posts the JSON response back.
 
@@ -13,20 +13,20 @@ For details about commands and CSV-to-LLM behavior, see the source in `src/`.
 
 ## Command-line interface (npx)
 
-This project exposes a small CLI via `npx discord-remote-chat-bot` which wraps the same logic used by the Discord bot. The CLI is a thin wrapper around the TypeScript sources and supports running from the compiled `dist/` or directly from `src/` (via `ts-node`).
+This project exposes a small CLI via `npx guildbot` which wraps the same logic used by the Discord bot. The CLI is a thin wrapper around the TypeScript sources and supports running from the compiled `dist/` or directly from `src/` (via `ts-node`).
 
 Commands:
 
 - Transcribe an audio file to text (uses `ffmpeg` + `whisper-cli`):
 
   ```bash
-  npx discord-remote-chat-bot transcribe /path/to/audio.m4a transcript.txt
+  npx guildbot transcribe /path/to/audio.m4a transcript.txt
   ```
 
 - Extract a raw diagram (nodes + relationships) from a transcript:
 
   ```bash
-  npx discord-remote-chat-bot diagram transcript.txt graph.json
+  npx guildbot diagram transcript.txt graph.json
   ```
 
   Output format: JSON with two arrays: `{ "nodes": [...], "relationships": [...] }`.
@@ -34,7 +34,7 @@ Commands:
 - Convert the raw diagram into a Kumu-compatible JSON blueprint:
 
   ```bash
-  npx discord-remote-chat-bot kumu graph.json kumu.json
+  npx guildbot kumu graph.json kumu.json
   ```
 
   `kumu.json` can be imported into Kumu via Import → Advanced → Import JSON file.
