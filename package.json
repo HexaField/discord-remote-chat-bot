@@ -35,6 +35,6 @@
     "node": ">=18"
   },
   "bin": {
-    "guildbot": "./bin/guildbot.js"
+    "guildbot": "./dist/cli.js"
   }
 }
