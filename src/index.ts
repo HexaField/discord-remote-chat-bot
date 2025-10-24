@@ -1,111 +1,112 @@
-import "dotenv/config";
+import * as appRoot from 'app-root-path'
 import {
+  ApplicationCommandDataResolvable,
+  AttachmentBuilder,
+  ChatInputCommandInteraction,
   Client,
   GatewayIntentBits,
-  Partials,
   Interaction,
-  ChatInputCommandInteraction,
-  ApplicationCommandDataResolvable,
-} from "discord.js";
-import * as appRoot from "app-root-path";
-import path from "path";
-import fs from "fs/promises";
-import { callLLM } from "./llm";
-import audioToDiagram from "./audioToDiagram";
+  Partials
+} from 'discord.js'
+import 'dotenv/config'
+import fs from 'fs/promises'
+import path from 'path'
+import audioToDiagram from './audioToDiagram'
+import { callLLM } from './llm'
 
-const DISCORD_TOKEN: string | undefined = process.env.DISCORD_TOKEN;
-const LLM_URL: string | undefined = process.env.LLM_URL;
-const LLM_API_KEY: string | undefined = process.env.LLM_API_KEY;
+const DISCORD_TOKEN: string | undefined = process.env.DISCORD_TOKEN
+const LLM_URL: string | undefined = process.env.LLM_URL
+const LLM_API_KEY: string | undefined = process.env.LLM_API_KEY
 
 if (!DISCORD_TOKEN) {
-  console.error("Missing DISCORD_TOKEN in environment");
-  process.exit(1);
+  console.error('Missing DISCORD_TOKEN in environment')
+  process.exit(1)
 }
 if (!LLM_URL) {
-  console.error("Missing LLM_URL in environment");
-  process.exit(1);
+  console.error('Missing LLM_URL in environment')
+  process.exit(1)
 }
 
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.GuildMessages
     // MessageContent is a privileged intent. If you haven't enabled it in
     // the Developer Portal for this bot, omit it to avoid a "Used disallowed intents" error.
     // GatewayIntentBits.MessageContent,
   ],
-  partials: [Partials.Channel],
-});
+  partials: [Partials.Channel]
+})
 
-client.once("ready", async () => {
-  console.log(`Logged in as ${client.user?.tag}`);
+client.once('ready', async () => {
+  console.log(`Logged in as ${client.user?.tag}`)
 
   try {
     // Register a simple guild-scoped command if GUILD_ID provided
-    const guildId = process.env.GUILD_ID;
+    const guildId = process.env.GUILD_ID
     if (guildId && client.application?.commands) {
       // Register /reflect command with a single `query` option
       const commands: ApplicationCommandDataResolvable[] = [
         {
-          name: "reflect",
-          description: "Reflect on a question",
+          name: 'reflect',
+          description: 'Reflect on a question',
           options: [
             {
-              name: "query",
-              description: "Your question",
+              name: 'query',
+              description: 'Your question',
               type: 3, // STRING
-              required: true,
-            },
-          ],
+              required: true
+            }
+          ]
         },
         {
-          name: "diagram",
-          description: "Turn an audio file into a diagram",
+          name: 'diagram',
+          description: 'Turn an audio file into a diagram',
           options: [
             {
-              name: "audio",
-              description: "The audio file to analyze",
+              name: 'audio',
+              description: 'The audio file to analyze',
               type: 11, // ATTACHMENT
-              required: true,
-            },
-          ],
-        },
-      ];
-      await client.application.commands.set(commands, guildId as string);
-      console.log("Registered /reflect command in guild", guildId);
+              required: true
+            }
+          ]
+        }
+      ]
+      await client.application.commands.set(commands, guildId as string)
+      console.log('Registered /reflect command in guild', guildId)
     }
   } catch (err) {
-    console.warn("Failed to register commands", err);
+    console.warn('Failed to register commands', err)
   }
-});
+})
 
 // We no longer expose a free-text prefix command. Interactions only.
 
 // Handle slash commands
-client.on("interactionCreate", async (interaction: Interaction) => {
-  if (!interaction.isChatInputCommand()) return;
-  const chat = interaction as ChatInputCommandInteraction;
+client.on('interactionCreate', async (interaction: Interaction) => {
+  if (!interaction.isChatInputCommand()) return
+  const chat = interaction as ChatInputCommandInteraction
 
   // /reflect handler: single `query` parameter, no CSV support
-  if (chat.commandName === "reflect") {
-    const reflectChannel = process.env.CHANNEL_ID;
+  if (chat.commandName === 'reflect') {
+    const reflectChannel = process.env.CHANNEL_ID
     if (reflectChannel && chat.channelId !== reflectChannel) {
       return chat.reply({
-        content: "This command can only be used in a designated channel.",
-        ephemeral: true,
-      });
+        content: 'This command can only be used in a designated channel.',
+        ephemeral: true
+      })
     }
 
-    const query = chat.options.getString("query", true);
+    const query = chat.options.getString('query', true)
 
-    await chat.deferReply();
+    await chat.deferReply()
 
     // Determine CSV source
-    const csvPath = process.env.CSV_PATH || "data/data.csv";
+    const csvPath = process.env.CSV_PATH || 'data/data.csv'
 
-    const root = appRoot.path;
-    const absPath = path.resolve(root, csvPath);
-    const table = await fs.readFile(absPath, "utf-8");
+    const root = appRoot.path
+    const absPath = path.resolve(root, csvPath)
+    const table = await fs.readFile(absPath, 'utf-8')
 
     try {
       const systemPrompt = `
@@ -115,50 +116,49 @@ Respond with just the string content requested.
 
 Here is the CSV data you will work with:
 
-${table}`;
+${table}`
 
-      const resp = await callLLM(systemPrompt, query);
-      if (!resp.success) return chat.editReply(`LLM error: ${resp.error}`);
+      const resp = await callLLM(systemPrompt, query)
+      if (!resp.success) return chat.editReply(`LLM error: ${resp.error}`)
 
-      const ans = resp.data;
-      const content =
-        typeof ans === "string" ? ans : JSON.stringify(ans, null, 2);
-      return chat.editReply(String(content));
+      const ans = resp.data
+      const content = typeof ans === 'string' ? ans : JSON.stringify(ans, null, 2)
+      return chat.editReply(String(content))
     } catch (err: any) {
-      console.error("reflect handler error", err);
+      console.error('reflect handler error', err)
       return chat.editReply({
-        content: `Error calling LLM: ${err?.message ?? String(err)}`,
-      });
+        content: `Error calling LLM: ${err?.message ?? String(err)}`
+      })
     }
   }
 
-  if (chat.commandName === "diagram") {
-    const attachment = chat.options.getAttachment("audio", true);
-    if (!attachment.contentType?.startsWith("audio/")) {
+  if (chat.commandName === 'diagram') {
+    const attachment = chat.options.getAttachment('audio', true)
+    if (!attachment.contentType?.startsWith('audio/')) {
       return chat.reply({
-        content: "Please provide a valid audio file.",
-        ephemeral: true,
-      });
+        content: 'Please provide a valid audio file.',
+        ephemeral: true
+      })
     }
 
-    await chat.deferReply();
+    await chat.deferReply()
 
     try {
-      const diagramURL = await audioToDiagram(attachment.url);
+      const diagram = await audioToDiagram(attachment.url)
       return chat.editReply({
-        content: "Here is your diagram:" + diagramURL,
-      });
+        content: 'Here is your diagram:' + diagram,
+        files: [new AttachmentBuilder(Buffer.from(diagram), { name: 'diagram.json' })]
+      })
     } catch (err: any) {
-      console.error("diagram handler error", err);
+      console.error('diagram handler error', err)
       return chat.editReply({
-        content: `Error calling audioToDiagram: ${err?.message ?? String(err)}`,
-      });
+        content: `Error calling audioToDiagram: ${err?.message ?? String(err)}`
+      })
     }
   }
-});
+})
 
 client.login(DISCORD_TOKEN).catch((e: unknown) => {
-  console.error("Login failed", e);
-  if (typeof process !== "undefined" && typeof process.exit === "function")
-    process.exit(1);
-});
+  console.error('Login failed', e)
+  if (typeof process !== 'undefined' && typeof process.exit === 'function') process.exit(1)
+})

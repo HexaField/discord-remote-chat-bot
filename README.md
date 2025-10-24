@@ -10,3 +10,48 @@ Quick start
 4. Build: `npm run build` then `node dist/index.js`
 
 For details about commands and CSV-to-LLM behavior, see the source in `src/`.
+
+## Command-line interface (npx)
+
+This project exposes a small CLI via `npx discord-remote-chat-bot` which wraps the same logic used by the Discord bot. The CLI is a thin wrapper around the TypeScript sources and supports running from the compiled `dist/` or directly from `src/` (via `ts-node`).
+
+Commands:
+
+- Transcribe an audio file to text (uses `ffmpeg` + `whisper-cli`):
+
+  ```bash
+  npx discord-remote-chat-bot transcribe /path/to/audio.m4a transcript.txt
+  ```
+
+- Extract a raw diagram (nodes + relationships) from a transcript:
+
+  ```bash
+  npx discord-remote-chat-bot diagram transcript.txt graph.json
+  ```
+
+  Output format: JSON with two arrays: `{ "nodes": [...], "relationships": [...] }`.
+
+- Convert the raw diagram into a Kumu-compatible JSON blueprint:
+
+  ```bash
+  npx discord-remote-chat-bot kumu graph.json kumu.json
+  ```
+
+  `kumu.json` can be imported into Kumu via Import → Advanced → Import JSON file.
+
+Requirements:
+
+- `ffmpeg` and `whisper-cli` must be on your PATH.
+- A Whisper model file must be present at `$WHISPER_MODEL` or `~/models/ggml-base.en.bin`.
+- Ollama HTTP endpoint must be reachable at `$OLLAMA_URL` (defaults to `http://localhost:11434/api/generate`) and the chosen model available.
+
+## Discord `/diagram` command
+
+The bot registers a `/diagram` slash command (if `GUILD_ID` is set during startup). Use it by attaching an audio file when invoking `/diagram`. The bot will:
+
+- Download the audio attachment
+- Convert it to 16kHz mono WAV and transcribe it with `whisper-cli`
+- Extract nodes and relationships using the configured LLM
+- Produce a Kumu JSON file and return the local path (or attach/upload if configured)
+
+This command reuses the same pipeline as the CLI, so results should match between local runs and the bot.
