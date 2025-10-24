@@ -6,24 +6,27 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
+    "dev": "NODE_ENV=development ts-node-dev --respawn --transpile-only src/index.ts",
     "lint": "eslint . --ext .ts",
     "test": "vitest run"
   },
   "author": "",
   "license": "MIT",
   "dependencies": {
+    "app-root-path": "^3.1.0",
+    "csv-parse": "^5.4.0",
     "discord.js": "^14.13.0",
     "dotenv": "^16.3.1",
+    "ollama": "^0.6.0",
     "zod": "^4.0.0"
   },
   "devDependencies": {
-    "typescript": "^5.4.2",
-    "ts-node-dev": "^2.0.0",
     "@types/node": "^20.4.2",
+    "cross-fetch": "^3.1.8",
     "eslint": "^8.47.0",
-    "vitest": "^1.2.1",
-    "cross-fetch": "^3.1.8"
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.4.2",
+    "vitest": "^1.2.1"
   },
   "engines": {
     "node": ">=18"
