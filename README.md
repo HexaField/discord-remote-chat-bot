@@ -45,6 +45,10 @@ Requirements:
 - A Whisper model file must be present at `$WHISPER_MODEL` or `~/models/ggml-base.en.bin`.
 - Ollama HTTP endpoint must be reachable at `$OLLAMA_URL` (defaults to `http://localhost:11434/api/generate`) and the chosen model available.
 
+## Discord `/reflect` command
+
+The bot registers a `/reflect` slash command (if `GUILD_ID` is set during startup). Use `/reflect` with a short free-text question (the command's `query` argument). The bot reads the CSV source configured by `CSV_PATH` (or `data/data.csv` by default), sends the CSV and your question to the configured LLM, and returns the model's string response.
+
 ## Discord `/diagram` command
 
 The bot registers a `/diagram` slash command (if `GUILD_ID` is set during startup). Use it by attaching an audio file when invoking `/diagram`. The bot will:
