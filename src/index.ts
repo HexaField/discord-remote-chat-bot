@@ -11,6 +11,7 @@ import * as appRoot from "app-root-path";
 import path from "path";
 import fs from "fs/promises";
 import { callLLM } from "./llm";
+import audioToDiagram from "./audioToDiagram";
 
 const DISCORD_TOKEN: string | undefined = process.env.DISCORD_TOKEN;
 const LLM_URL: string | undefined = process.env.LLM_URL;
@@ -44,19 +45,33 @@ client.once("ready", async () => {
     const guildId = process.env.GUILD_ID;
     if (guildId && client.application?.commands) {
       // Register /reflect command with a single `query` option
-      const reflectBody: ApplicationCommandDataResolvable = {
-        name: "reflect",
-        description: "Reflect on a question",
-        options: [
-          {
-            name: "query",
-            description: "Your question",
-            type: 3, // STRING
-            required: true,
-          },
-        ],
-      };
-      await client.application.commands.set([reflectBody], guildId as string);
+      const commands: ApplicationCommandDataResolvable[] = [
+        {
+          name: "reflect",
+          description: "Reflect on a question",
+          options: [
+            {
+              name: "query",
+              description: "Your question",
+              type: 3, // STRING
+              required: true,
+            },
+          ],
+        },
+        {
+          name: "diagram",
+          description: "Turn an audio file into a diagram",
+          options: [
+            {
+              name: "audio",
+              description: "The audio file to analyze",
+              type: 11, // ATTACHMENT
+              required: true,
+            },
+          ],
+        },
+      ];
+      await client.application.commands.set(commands, guildId as string);
       console.log("Registered /reflect command in guild", guildId);
     }
   } catch (err) {
@@ -113,6 +128,30 @@ ${table}`;
       console.error("reflect handler error", err);
       return chat.editReply({
         content: `Error calling LLM: ${err?.message ?? String(err)}`,
+      });
+    }
+  }
+
+  if (chat.commandName === "diagram") {
+    const attachment = chat.options.getAttachment("audio", true);
+    if (!attachment.contentType?.startsWith("audio/")) {
+      return chat.reply({
+        content: "Please provide a valid audio file.",
+        ephemeral: true,
+      });
+    }
+
+    await chat.deferReply();
+
+    try {
+      const diagramURL = await audioToDiagram(attachment.url);
+      return chat.editReply({
+        content: "Here is your diagram:" + diagramURL,
+      });
+    } catch (err: any) {
+      console.error("diagram handler error", err);
+      return chat.editReply({
+        content: `Error calling audioToDiagram: ${err?.message ?? String(err)}`,
       });
     }
   }
