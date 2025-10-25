@@ -43,16 +43,27 @@ export async function callLLM<T = unknown>(
     options: {
       num_ctx: modelSettings[model]?.maxContext || MODEL_MAX_CTX
     },
+    stream: true,
     messages: [
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userQuery }
     ]
   })
 
+  // use async iterator to get the full response
+  let fullMessage = ''
+  for await (const chunk of response) {
+    if (chunk.message?.content) {
+      fullMessage += chunk.message.content
+    }
+  }
+
   debug('LLM response status', response)
+
+  debug('LLM full response', fullMessage)
 
   return {
     success: true,
-    data: response.message.content
+    data: fullMessage
   }
 }

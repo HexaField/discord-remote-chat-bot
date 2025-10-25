@@ -7,7 +7,7 @@ import { convertTo16kMonoWav, ensureFfmpegAvailable } from './ffmpeg'
 import { callLLM } from './llm'
 import { ensureWhisperAvailable, transcribeWithWhisper } from './whisper'
 
-const TMP_DIR = appRootPath.resolve('.tmp/audio-to-diagram')
+const TMP_DIR = path.resolve(appRootPath.path, '.tmp/audio-to-diagram')
 
 function normalizeCSL(txt: string) {
   return txt
@@ -192,14 +192,17 @@ export default async function audioToDiagram(audioURL: string) {
   await ensureFfmpegAvailable()
   await ensureWhisperAvailable()
 
-  const urlPath =
-    audioURL.includes('youtube.com') || audioURL.includes('youtu.be')
-      ? audioURL.split('?v=').pop() || ''
+  const urlPath = audioURL.includes('youtube.com')
+    ? new URL(audioURL).searchParams.get('v')!
+    : audioURL.includes('youtu.be')
+      ? new URL(audioURL).pathname.slice(1)
       : new URL(audioURL).pathname
+  if (!urlPath) throw new Error('Invalid audio URL')
+
   const originalName = path.basename(urlPath) || `audio-${Date.now()}`
   const baseName = path.basename(originalName, path.extname(originalName))
 
-  const audioPath = path.join(TMP_DIR, originalName).endsWith('.wav') ? originalName : `${baseName}.wav`
+  const audioPath = path.join(TMP_DIR, originalName.endsWith('.wav') ? originalName : `${baseName}.wav`)
   const transcriptPath = path.join(TMP_DIR, `${baseName}.txt`)
 
   // Download
