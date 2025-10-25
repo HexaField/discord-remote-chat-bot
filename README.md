@@ -39,6 +39,14 @@ Commands:
 
   `kumu.json` can be imported into Kumu via Import → Advanced → Import JSON file.
 
+- Convert the raw diagram into a Mermaid graph:
+
+  ```bash
+  npx guildbot mermaid graph.json diagram.md
+  ```
+
+  Output format: Markdown file with a Mermaid code block.
+
 Requirements:
 
 - `ffmpeg` and `whisper-cli` must be on your PATH.

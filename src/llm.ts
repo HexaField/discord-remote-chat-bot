@@ -1,6 +1,15 @@
 import ollama from 'ollama'
 import { debug } from './logger'
 
+const modelSettings = {
+  'llama3.2': {
+    maxContext: 128000
+  },
+  'gpt-oss:20b': {
+    maxContext: 32000
+  }
+} as const
+
 const MODEL_MAX_CTX = 128000
 
 export type LLMResponse<T = unknown> = {
@@ -9,8 +18,12 @@ export type LLMResponse<T = unknown> = {
   error?: string
 }
 
-export async function callLLM<T = unknown>(systemPrompt: string, userQuery: string): Promise<LLMResponse<T>> {
-  debug('LLM payload', userQuery)
+export async function callLLM<T = unknown>(
+  systemPrompt: string,
+  userQuery: string,
+  model = 'llama3.2' as keyof typeof modelSettings
+): Promise<LLMResponse<T>> {
+  // debug('LLM payload', userQuery)
 
   // Combine the prompts and call the Python tokenizer to count tokens.
   const combinedText = `${systemPrompt}\n${userQuery}`
@@ -26,9 +39,9 @@ export async function callLLM<T = unknown>(systemPrompt: string, userQuery: stri
   }
 
   const response = await ollama.chat({
-    model: 'llama3.2',
+    model,
     options: {
-      num_ctx: MODEL_MAX_CTX
+      num_ctx: modelSettings[model]?.maxContext || MODEL_MAX_CTX
     },
     messages: [
       { role: 'system', content: systemPrompt },
@@ -36,12 +49,10 @@ export async function callLLM<T = unknown>(systemPrompt: string, userQuery: stri
     ]
   })
 
-  // debug("LLM response status", response);
-
-  const responseWithQuestion = `***${userQuery}***\n\n${response.message.content}`
+  debug('LLM response status', response)
 
   return {
     success: true,
-    data: responseWithQuestion
+    data: response.message.content
   }
 }

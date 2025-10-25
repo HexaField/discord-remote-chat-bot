@@ -95,6 +95,74 @@ export async function transcribeAudioFile(inputPath: string, transcriptPath: str
   return transcript
 }
 
+export async function generateNodes(transcript: string) {
+  const nodesSystem = `You are an assistant that extracts a comma separated list of concepts from a document. Respond with a single comma-separated string.`
+  const rawNodesResp = await callLLM(nodesSystem, transcript, 'gpt-oss:20b')
+  if (!rawNodesResp.success) throw new Error(rawNodesResp.error || 'LLM failed extracting nodes')
+  const rawNodesText = String(rawNodesResp.data || '')
+  const nodes = extractNodes(rawNodesText)
+  return nodes
+}
+
+export async function generateRelationships(transcript: string, nodes: string[]) {
+  const relsSystem = `You are an assistant that extracts relationships from a list of nodes given a transcript. Respond with a comma separated list. Each relationship must be in the form 'from node-relationship label-to node'. Only include relationships supported by the provided document. The nodes are: ${nodes.join(
+    ', '
+  )}.`
+  const rawRelsResp = await callLLM(relsSystem, transcript, 'gpt-oss:20b')
+  if (!rawRelsResp.success) throw new Error(rawRelsResp.error || 'LLM failed extracting relationships')
+  const rawRelsText = String(rawRelsResp.data || '')
+  const relationships = extractRelationships(rawRelsText)
+  return relationships
+}
+
+// Build a simple Mermaid graph (graph TD) with labelled edges
+export function toMermaid(nodes: string[], relationships: string[]) {
+  // Escape Mermaid special chars lightly for ids/labels
+  const id = (s: string) => s.replace(/[^\w\u00C0-\u017F]+/g, '_').replace(/^_+|_+$/g, '') || 'N'
+  const uniqueNodes = Array.from(new Set(nodes))
+
+  // Build nodes as labeled boxes
+  const nodeLines = uniqueNodes.map((n) => {
+    const nid = id(n)
+    // Use quotes for label to preserve spaces
+    return `${nid}["${n}"]`
+  })
+
+  // Parse relationships like "from-node-relationship-to-node"
+  const edgeLines = [] as string[]
+  for (const rel of relationships) {
+    // Try to split as: from - label - to
+    // Accept separators: '-', '->', '—', '–' (users sometimes paste variants)
+    // We look for exactly three chunks: from, label, to.
+    let parts = rel
+      .split(/-+>|—|–/g)
+      .map((s) => s.trim())
+      .filter(Boolean)
+    if (parts.length === 3) {
+      const [from, label, to] = parts
+      const fid = id(from)
+      const tid = id(to)
+      edgeLines.push(`${fid} -- "${label}" --> ${tid}`)
+    } else {
+      // fallback: try simple hyphen split into three segments
+      const p2 = rel
+        .split('-')
+        .map((s) => s.trim())
+        .filter(Boolean)
+      if (p2.length >= 3) {
+        const from = p2.shift()!
+        const to = p2.pop()!
+        const label = p2.join('-')
+        const fid = id(from)
+        const tid = id(to)
+        edgeLines.push(`${fid} -- "${label}" --> ${tid}`)
+      }
+    }
+  }
+
+  return ['```mermaid', 'graph TD', ...nodeLines, ...edgeLines, '```'].join('\n')
+}
+
 export default async function audioToDiagram(attachmentUrl: string) {
   await fsp.mkdir(TMP_DIR, { recursive: true })
 
@@ -107,9 +175,7 @@ export default async function audioToDiagram(attachmentUrl: string) {
   const baseName = path.basename(originalName, path.extname(originalName))
 
   const audioPath = path.join(TMP_DIR, originalName)
-  const wavPath = path.join(TMP_DIR, `${baseName}.wav`)
   const transcriptPath = path.join(TMP_DIR, `${baseName}.txt`)
-  const outBase = path.join(TMP_DIR, baseName)
 
   // Download
   await downloadToFile(attachmentUrl, audioPath)
@@ -117,20 +183,9 @@ export default async function audioToDiagram(attachmentUrl: string) {
   // Transcribe
   const transcript = await transcribeAudioFile(audioPath, transcriptPath)
 
-  // LLM calls: use callLLM from ./llm
-  const nodesSystem = `You are an assistant that extracts a comma separated list of concepts from a document. Respond with a single comma-separated string.`
-  const rawNodesResp = await callLLM(nodesSystem, transcript)
-  if (!rawNodesResp.success) throw new Error(rawNodesResp.error || 'LLM failed extracting nodes')
-  const rawNodesText = String(rawNodesResp.data || '')
-  const nodes = extractNodes(rawNodesText)
-
-  const relsSystem = `You are an assistant that extracts relationships between the following concepts: ${nodes.join(
-    ', '
-  )}. Respond with a comma separated list. Each relationship must be in the form 'from node-relationship label-to node'. Only include relationships supported by the provided document.`
-  const rawRelsResp = await callLLM(relsSystem, transcript)
-  if (!rawRelsResp.success) throw new Error(rawRelsResp.error || 'LLM failed extracting relationships')
-  const rawRelsText = String(rawRelsResp.data || '')
-  const relationships = extractRelationships(rawRelsText)
+  // Generate nodes and relationships
+  const nodes = await generateNodes(transcript)
+  const relationships = await generateRelationships(transcript, nodes)
 
   const kumu = toKumuJSON(nodes, relationships)
 

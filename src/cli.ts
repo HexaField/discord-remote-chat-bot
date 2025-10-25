@@ -2,8 +2,7 @@
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
-import { extractNodes, extractRelationships, toKumuJSON, transcribeAudioFile } from './audioToDiagram'
-import { callLLM } from './llm'
+import { generateNodes, generateRelationships, toKumuJSON, toMermaid, transcribeAudioFile } from './audioToDiagram'
 
 async function cmdTranscribe(input: string, output: string) {
   if (!input || !output) {
@@ -21,26 +20,13 @@ async function cmdTranscribe(input: string, output: string) {
   console.log('Transcript written to', output)
 }
 
-async function ollamaOnce(prompt: string) {
-  const resp = await callLLM('', prompt)
-  if (!resp.success) throw new Error(resp.error || 'LLM error')
-  return String(resp.data ?? '')
-}
-
 async function cmdDiagram(input: string, output: string) {
   if (!input || !output) throw new Error('Usage: diagram <input.txt> <output.json>')
   if (!fs.existsSync(input)) throw new Error(`Input not found: ${input}`)
   const transcript = await fsp.readFile(input, 'utf8')
 
-  const nodesPrompt = `Extract as a comma separated list the concepts in the following document that will be used to build a relational causal loop diagram.\n\n${transcript}`
-  const rawNodes = await ollamaOnce(nodesPrompt)
-  const nodes = extractNodes(rawNodes)
-
-  const relsPrompt = `Extract as a comma separated list the relationships between the nodes: ${nodes.join(
-    ', '
-  )} , according to and only according to the following document that will be used to build a relational causal loop diagram. Each relationship must be in the form 'from node-relationship label-to node'.\n\n${transcript}`
-  const rawRels = await ollamaOnce(relsPrompt)
-  const relationships = extractRelationships(rawRels)
+  const nodes = await generateNodes(transcript)
+  const relationships = await generateRelationships(transcript, nodes)
 
   await fsp.writeFile(output, JSON.stringify({ nodes, relationships }, null, 2), 'utf8')
   console.log('Diagram JSON written to', output)
@@ -63,12 +49,31 @@ async function cmdKumu(input: string, output: string) {
   console.log('Kumu JSON written to', output)
 }
 
+async function cmdMermaid(input: string, output: string) {
+  if (!input || !output) throw new Error('Usage: mermaid <graph.json> <output.mmd>')
+  if (!fs.existsSync(input)) throw new Error(`Input not found: ${input}`)
+
+  const graph = JSON.parse(await fsp.readFile(input, 'utf8'))
+  const nodes: string[] = graph.nodes ?? graph.elements ?? []
+  const relationships: string[] = graph.relationships ?? graph.connections ?? []
+
+  if (!Array.isArray(nodes) || !Array.isArray(relationships)) {
+    throw new Error("Input graph must contain arrays 'nodes' and 'relationships' (or 'elements'/'connections')")
+  }
+
+  // Convert to mermaid syntax
+  const mermaid = toMermaid(nodes, relationships)
+  await fsp.writeFile(output, mermaid, 'utf8')
+  console.log('Mermaid diagram written to', output)
+}
+
 async function main(argv: string[]) {
   const cmd = argv[0]
   try {
     if (cmd === 'transcribe') await cmdTranscribe(argv[1], argv[2])
     else if (cmd === 'diagram') await cmdDiagram(argv[1], argv[2])
     else if (cmd === 'kumu') await cmdKumu(argv[1], argv[2])
+    else if (cmd === 'mermaid') await cmdMermaid(argv[1], argv[2])
     else {
       console.log('Usage: npx <pkg> <command> [args]')
       console.log('Commands:')

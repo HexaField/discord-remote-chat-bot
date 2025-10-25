@@ -3,3 +3,4 @@ dist/
 .env
 csvs/
 package-lock.json
+.tmp_*

@@ -122,8 +122,8 @@ ${table}`
       if (!resp.success) return chat.editReply(`LLM error: ${resp.error}`)
 
       const ans = resp.data
-      const content = typeof ans === 'string' ? ans : JSON.stringify(ans, null, 2)
-      return chat.editReply(String(content))
+      const responseWithQuestion = `***${query}***\n\n${ans}`
+      return chat.editReply(responseWithQuestion)
     } catch (err: any) {
       console.error('reflect handler error', err)
       return chat.editReply({
