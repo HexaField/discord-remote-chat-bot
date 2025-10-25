@@ -1,6 +1,7 @@
 import * as appRoot from 'app-root-path'
 import {
   ApplicationCommandDataResolvable,
+  ApplicationCommandOptionType,
   AttachmentBuilder,
   ChatInputCommandInteraction,
   Client,
@@ -16,7 +17,6 @@ import { callLLM } from './llm'
 
 const DISCORD_TOKEN: string | undefined = process.env.DISCORD_TOKEN
 const LLM_URL: string | undefined = process.env.LLM_URL
-const LLM_API_KEY: string | undefined = process.env.LLM_API_KEY
 
 if (!DISCORD_TOKEN) {
   console.error('Missing DISCORD_TOKEN in environment')
@@ -54,7 +54,7 @@ client.once('ready', async () => {
             {
               name: 'query',
               description: 'Your question',
-              type: 3, // STRING
+              type: ApplicationCommandOptionType.String, // STRING
               required: true
             }
           ]
@@ -66,8 +66,14 @@ client.once('ready', async () => {
             {
               name: 'audio',
               description: 'The audio file to analyze',
-              type: 11, // ATTACHMENT
-              required: true
+              type: ApplicationCommandOptionType.Attachment, // ATTACHMENT
+              required: false
+            },
+            {
+              name: 'url',
+              description: 'A URL to an audio file to analyze',
+              type: ApplicationCommandOptionType.String, // STRING
+              required: false
             }
           ]
         }
@@ -122,8 +128,32 @@ ${table}`
       if (!resp.success) return chat.editReply(`LLM error: ${resp.error}`)
 
       const ans = resp.data
-      const responseWithQuestion = `***${query}***\n\n${ans}`
-      return chat.editReply(responseWithQuestion)
+      const MAX_LEN = 2000
+      const full = `***${query}***\n\n${ans}`
+
+      const splitIntoChunks = (text: string, maxLen: number): string[] => {
+        const chunks: string[] = []
+        let remaining = text
+        while (remaining.length > maxLen) {
+          // try to break at a newline first, then a space, otherwise hard cut
+          let idx = remaining.lastIndexOf('\n', maxLen)
+          if (idx <= 0) idx = remaining.lastIndexOf(' ', maxLen)
+          if (idx <= 0) idx = maxLen
+          chunks.push(remaining.slice(0, idx))
+          remaining = remaining.slice(idx).trimStart()
+        }
+        if (remaining.length > 0) chunks.push(remaining)
+        return chunks
+      }
+
+      const chunks = splitIntoChunks(full, MAX_LEN)
+
+      // send first chunk as the deferred reply, follow up for the rest
+      await chat.editReply(chunks[0])
+      for (let i = 1; i < chunks.length; i++) {
+        await chat.followUp({ content: chunks[i] })
+      }
+      return
     } catch (err: any) {
       console.error('reflect handler error', err)
       return chat.editReply({
@@ -133,21 +163,23 @@ ${table}`
   }
 
   if (chat.commandName === 'diagram') {
-    const attachment = chat.options.getAttachment('audio', true)
-    if (!attachment.contentType?.startsWith('audio/')) {
-      return chat.reply({
-        content: 'Please provide a valid audio file.',
-        ephemeral: true
-      })
-    }
+    const attachment = chat.options.getAttachment('audio', false)
 
     await chat.deferReply()
 
+    // get the URL of the attachment, falling back to pulling a link from the message text
+    const url = attachment?.url ?? chat.toString().match(/https?:\/\/\S+/)?.[0]
+
+    if (!url) {
+      return chat.editReply('Please provide an audio file attachment or a URL link to an audio file.')
+    }
+
     try {
-      const diagram = await audioToDiagram(attachment.url)
+      const diagramFilePath = await audioToDiagram(url)
+      const diagramData = await fs.readFile(diagramFilePath, 'utf-8')
       return chat.editReply({
-        content: 'Here is your diagram:' + diagram,
-        files: [new AttachmentBuilder(Buffer.from(diagram), { name: 'diagram.json' })]
+        content: 'Here is your diagram for ' + url,
+        files: [new AttachmentBuilder(Buffer.from(diagramData), { name: 'diagram.json' })]
       })
     } catch (err: any) {
       console.error('diagram handler error', err)

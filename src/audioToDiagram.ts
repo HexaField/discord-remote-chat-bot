@@ -1,3 +1,5 @@
+import appRootPath from 'app-root-path'
+import { execFile } from 'node:child_process'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -5,7 +7,7 @@ import { convertTo16kMonoWav, ensureFfmpegAvailable } from './ffmpeg'
 import { callLLM } from './llm'
 import { ensureWhisperAvailable, transcribeWithWhisper } from './whisper'
 
-const TMP_DIR = path.resolve('.tmp_ailoop')
+const TMP_DIR = appRootPath.resolve('.tmp/audio-to-diagram')
 
 function normalizeCSL(txt: string) {
   return txt
@@ -78,14 +80,14 @@ async function downloadToFile(url: string, dest: string) {
  * Accepts an audio file URL, returns the path to the generated Kumu JSON file.
  */
 export async function transcribeAudioFile(inputPath: string, transcriptPath: string) {
-  await fsp.mkdir(TMP_DIR, { recursive: true })
-
   // Convert
   const baseName = path.basename(inputPath, path.extname(inputPath))
   const wavPath = path.join(TMP_DIR, `${baseName}.wav`)
   const outBase = path.join(TMP_DIR, baseName)
 
-  await convertTo16kMonoWav(inputPath, wavPath)
+  if (path.extname(inputPath).toLowerCase() !== '.wav') {
+    await convertTo16kMonoWav(inputPath, wavPath)
+  }
 
   // Transcribe (WHISPER_MODEL env or default)
   const WHISPER_MODEL = process.env.WHISPER_MODEL || path.join(os.homedir(), 'models/ggml-base.en.bin')
@@ -163,22 +165,49 @@ export function toMermaid(nodes: string[], relationships: string[]) {
   return ['```mermaid', 'graph TD', ...nodeLines, ...edgeLines, '```'].join('\n')
 }
 
-export default async function audioToDiagram(attachmentUrl: string) {
+export async function downloadYoutubeAudio(youtubeURL: string, destPath: string) {
+  // check if it's already downloaded
+  try {
+    await fsp.stat(destPath)
+    return
+  } catch (err) {
+    // not found, proceed to download
+  }
+  return new Promise<void>((resolve, reject) => {
+    const ytdlp = 'yt-dlp' // Assumes yt-dlp is installed and on PATH
+    const args = ['-x', '--audio-format', 'wav', '-o', destPath, youtubeURL]
+    execFile(ytdlp, args, (error, stdout, stderr) => {
+      if (error) {
+        return reject(new Error(`yt-dlp error: ${error.message}\n${stderr}`))
+      }
+      resolve()
+    })
+  })
+}
+
+export default async function audioToDiagram(audioURL: string) {
   await fsp.mkdir(TMP_DIR, { recursive: true })
 
   // Ensure tools
   await ensureFfmpegAvailable()
   await ensureWhisperAvailable()
 
-  const urlPath = new URL(attachmentUrl).pathname
+  const urlPath =
+    audioURL.includes('youtube.com') || audioURL.includes('youtu.be')
+      ? audioURL.split('?v=').pop() || ''
+      : new URL(audioURL).pathname
   const originalName = path.basename(urlPath) || `audio-${Date.now()}`
   const baseName = path.basename(originalName, path.extname(originalName))
 
-  const audioPath = path.join(TMP_DIR, originalName)
+  const audioPath = path.join(TMP_DIR, originalName).endsWith('.wav') ? originalName : `${baseName}.wav`
   const transcriptPath = path.join(TMP_DIR, `${baseName}.txt`)
 
   // Download
-  await downloadToFile(attachmentUrl, audioPath)
+  if (audioURL.includes('youtube.com') || audioURL.includes('youtu.be')) {
+    await downloadYoutubeAudio(audioURL, audioPath)
+  } else {
+    await downloadToFile(audioURL, audioPath)
+  }
 
   // Transcribe
   const transcript = await transcribeAudioFile(audioPath, transcriptPath)

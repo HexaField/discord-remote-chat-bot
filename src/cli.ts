@@ -1,21 +1,38 @@
 #!/usr/bin/env node
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
+import os from 'node:os'
 import path from 'node:path'
-import { generateNodes, generateRelationships, toKumuJSON, toMermaid, transcribeAudioFile } from './audioToDiagram'
+import {
+  downloadYoutubeAudio,
+  generateNodes,
+  generateRelationships,
+  toKumuJSON,
+  toMermaid,
+  transcribeAudioFile
+} from './audioToDiagram'
 
 async function cmdTranscribe(input: string, output: string) {
   if (!input || !output) {
     throw new Error('Usage: transcribe <input.ext> <output.txt>')
   }
-  if (!fs.existsSync(input)) throw new Error(`Input not found: ${input}`)
 
-  const baseName = path.basename(input, path.extname(input))
-  const tmpDir = path.resolve('.tmp_ailoop')
+  let audioPath = input
+
+  // Download
+  if (input.includes('youtube.com') || input.includes('youtu.be')) {
+    await downloadYoutubeAudio(input, output.replace(/\.txt$/i, '.wav'))
+    audioPath = output.replace(/\.txt$/i, '.wav')
+  }
+
+  if (!fs.existsSync(audioPath)) throw new Error(`Input not found: ${audioPath}`)
+
+  const baseName = path.basename(audioPath, path.extname(audioPath))
+  const tmpDir = os.tmpdir()
   await fsp.mkdir(tmpDir, { recursive: true })
   const transcriptPath = path.join(tmpDir, `${baseName}.txt`)
 
-  const transcript = await transcribeAudioFile(input, transcriptPath)
+  const transcript = await transcribeAudioFile(audioPath, transcriptPath)
   await fsp.writeFile(output, transcript, 'utf8')
   console.log('Transcript written to', output)
 }

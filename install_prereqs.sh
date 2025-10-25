@@ -46,6 +46,14 @@ else
   echo "✅ Whisper model already present: $MODEL_FILE"
 fi
 
+# --- install yt-dlp ---
+if ! command -v yt-dlp &>/dev/null; then
+  echo "📥 Installing yt-dlp..."
+  brew install yt-dlp || true
+else
+  echo "✅ yt-dlp already installed."
+fi
+
 # --- summary ---
 echo ""
 echo "✅ All prerequisites installed."
