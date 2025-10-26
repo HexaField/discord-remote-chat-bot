@@ -12,17 +12,17 @@ const modelSettings = {
 
 const MODEL_MAX_CTX = 128000
 
-export type LLMResponse<T = unknown> = {
+export type LLMResponse = {
   success: boolean
   data?: string
   error?: string
 }
 
-export async function callLLM<T = unknown>(
+export async function callLLM(
   systemPrompt: string,
   userQuery: string,
   model = 'llama3.2' as keyof typeof modelSettings
-): Promise<LLMResponse<T>> {
+): Promise<LLMResponse> {
   // debug('LLM payload', userQuery)
 
   // Combine the prompts and call the Python tokenizer to count tokens.
