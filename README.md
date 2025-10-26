@@ -67,3 +67,7 @@ The bot registers a `/diagram` slash command (if `GUILD_ID` is set during startu
 - Produce a Kumu JSON file and return the local path (or attach/upload if configured)
 
 This command reuses the same pipeline as the CLI, so results should match between local runs and the bot.
+
+# Todo
+
+- render mermaid diagrams to image file with https://github.com/mermaid-js/mermaid-cli
