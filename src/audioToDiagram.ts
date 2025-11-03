@@ -3,8 +3,11 @@ import { execFile } from 'node:child_process'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { exportMermaid } from './exporters/mermaidExporter'
+import { exportRDF } from './exporters/rdfExporter'
 import { convertTo16kMonoWav, ensureFfmpegAvailable } from './ffmpeg'
 import { callLLM } from './llm'
+import { debug, info } from './logger'
 import { ensureWhisperAvailable, transcribeWithWhisper } from './whisper'
 
 const TMP_DIR = path.resolve(appRootPath.path, '.tmp/audio-to-diagram')
@@ -79,19 +82,19 @@ async function downloadToFile(url: string, dest: string) {
  * Main exported function used by the discord command handler.
  * Accepts an audio file URL, returns the path to the generated Kumu JSON file.
  */
-export async function transcribeAudioFile(inputPath: string, transcriptPath: string) {
+export async function transcribeAudioFile(inputPath: string, transcriptPath: string, audioFormat = 'mp3') {
   // Convert
   const baseName = path.basename(inputPath, path.extname(inputPath))
-  const wavPath = path.join(TMP_DIR, `${baseName}.wav`)
+  const audioPath = path.join(TMP_DIR, `${baseName}.${audioFormat}`)
   const outBase = path.join(TMP_DIR, baseName)
 
-  if (path.extname(inputPath).toLowerCase() !== '.wav') {
-    await convertTo16kMonoWav(inputPath, wavPath)
+  if (path.extname(inputPath).toLowerCase() !== `.${audioFormat}`) {
+    await convertTo16kMonoWav(inputPath, audioPath)
   }
 
   // Transcribe (WHISPER_MODEL env or default)
   const WHISPER_MODEL = process.env.WHISPER_MODEL || path.join(os.homedir(), 'models/ggml-base.en.bin')
-  await transcribeWithWhisper(WHISPER_MODEL, wavPath, transcriptPath, outBase)
+  await transcribeWithWhisper(WHISPER_MODEL, audioPath, transcriptPath, outBase)
 
   const transcript = await fsp.readFile(transcriptPath, 'utf8')
   return transcript
@@ -117,55 +120,7 @@ export async function generateRelationships(transcript: string, nodes: string[])
   return relationships
 }
 
-// Build a simple Mermaid graph (graph TD) with labelled edges
-export function toMermaid(nodes: string[], relationships: string[]) {
-  // Escape Mermaid special chars lightly for ids/labels
-  const id = (s: string) => s.replace(/[^\w\u00C0-\u017F]+/g, '_').replace(/^_+|_+$/g, '') || 'N'
-  const uniqueNodes = Array.from(new Set(nodes))
-
-  // Build nodes as labeled boxes
-  const nodeLines = uniqueNodes.map((n) => {
-    const nid = id(n)
-    // Use quotes for label to preserve spaces
-    return `${nid}["${n}"]`
-  })
-
-  // Parse relationships like "from-node-relationship-to-node"
-  const edgeLines = [] as string[]
-  for (const rel of relationships) {
-    // Try to split as: from - label - to
-    // Accept separators: '-', '->', '—', '–' (users sometimes paste variants)
-    // We look for exactly three chunks: from, label, to.
-    let parts = rel
-      .split(/-+>|—|–/g)
-      .map((s) => s.trim())
-      .filter(Boolean)
-    if (parts.length === 3) {
-      const [from, label, to] = parts
-      const fid = id(from)
-      const tid = id(to)
-      edgeLines.push(`${fid} -- "${label}" --> ${tid}`)
-    } else {
-      // fallback: try simple hyphen split into three segments
-      const p2 = rel
-        .split('-')
-        .map((s) => s.trim())
-        .filter(Boolean)
-      if (p2.length >= 3) {
-        const from = p2.shift()!
-        const to = p2.pop()!
-        const label = p2.join('-')
-        const fid = id(from)
-        const tid = id(to)
-        edgeLines.push(`${fid} -- "${label}" --> ${tid}`)
-      }
-    }
-  }
-
-  return ['```mermaid', 'graph TD', ...nodeLines, ...edgeLines, '```'].join('\n')
-}
-
-export async function downloadYoutubeAudio(youtubeURL: string, destPath: string) {
+export async function downloadYoutubeAudio(youtubeURL: string, destPath: string, audioFormat = 'mp3') {
   // check if it's already downloaded
   try {
     await fsp.stat(destPath)
@@ -175,7 +130,9 @@ export async function downloadYoutubeAudio(youtubeURL: string, destPath: string)
   }
   return new Promise<void>((resolve, reject) => {
     const ytdlp = 'yt-dlp' // Assumes yt-dlp is installed and on PATH
-    const args = ['-x', '--audio-format', 'wav', '-o', destPath, youtubeURL]
+
+    // use lowest quality audio format to minimize download size
+    const args = ['-x', '--audio-quality', 'lowest', '--audio-format', audioFormat, '-o', destPath, youtubeURL]
     execFile(ytdlp, args, (error, stdout, stderr) => {
       if (error) {
         return reject(new Error(`yt-dlp error: ${error.message}\n${stderr}`))
@@ -199,30 +156,136 @@ export default async function audioToDiagram(audioURL: string) {
       : new URL(audioURL).pathname
   if (!urlPath) throw new Error('Invalid audio URL')
 
+  const audioFormat = 'mp3'
+
   const originalName = path.basename(urlPath) || `audio-${Date.now()}`
   const baseName = path.basename(originalName, path.extname(originalName))
 
-  const audioPath = path.join(TMP_DIR, originalName.endsWith('.wav') ? originalName : `${baseName}.wav`)
+  const audioPath = path.join(
+    TMP_DIR,
+    originalName.endsWith(`.${audioFormat}`) ? originalName : `${baseName}.${audioFormat}`
+  )
   const transcriptPath = path.join(TMP_DIR, `${baseName}.txt`)
+  const nodesPath = path.join(TMP_DIR, `${baseName}.nodes.json`)
+  const relsPath = path.join(TMP_DIR, `${baseName}.relationships.json`)
 
   // Download
   if (audioURL.includes('youtube.com') || audioURL.includes('youtu.be')) {
-    await downloadYoutubeAudio(audioURL, audioPath)
+    await downloadYoutubeAudio(audioURL, audioPath, audioFormat)
   } else {
     await downloadToFile(audioURL, audioPath)
   }
 
-  // Transcribe
-  const transcript = await transcribeAudioFile(audioPath, transcriptPath)
+  // Transcribe (reuse existing transcript if present)
+  async function existsNonEmpty(p: string) {
+    try {
+      const stat = await fsp.stat(p)
+      console.log(`File ${p} exists:`, stat.isFile() && stat.size > 0)
+      return stat.isFile() && stat.size > 0
+    } catch (e) {
+      return false
+    }
+  }
+
+  let transcript: string
+  if (await existsNonEmpty(transcriptPath)) {
+    debug('Using existing transcript at', transcriptPath)
+    transcript = await fsp.readFile(transcriptPath, 'utf8')
+  } else {
+    transcript = await transcribeAudioFile(audioPath, transcriptPath)
+  }
 
   // Generate nodes and relationships
-  const nodes = await generateNodes(transcript)
-  const relationships = await generateRelationships(transcript, nodes)
+  // Load or generate nodes
+  let nodes: string[]
+  try {
+    if (await existsNonEmpty(nodesPath)) {
+      debug('Loading existing nodes from', nodesPath)
+      const raw = await fsp.readFile(nodesPath, 'utf8')
+      nodes = JSON.parse(raw) as string[]
+    } else {
+      nodes = await generateNodes(transcript)
+      // atomic write nodes
+      const tmpNodes = path.join(TMP_DIR, `.${baseName}.nodes.json.partial`)
+      await fsp.writeFile(tmpNodes, JSON.stringify(nodes, null, 2), 'utf8')
+      await fsp.rename(tmpNodes, nodesPath)
+    }
+  } catch (e) {
+    debug('Failed reading nodes file, regenerating', e)
+    nodes = await generateNodes(transcript)
+  }
+
+  // Load or generate relationships
+  let relationships: string[]
+  try {
+    if (await existsNonEmpty(relsPath)) {
+      debug('Loading existing relationships from', relsPath)
+      const raw = await fsp.readFile(relsPath, 'utf8')
+      relationships = JSON.parse(raw) as string[]
+    } else {
+      relationships = await generateRelationships(transcript, nodes)
+      const tmpRels = path.join(TMP_DIR, `.${baseName}.relationships.json.partial`)
+      await fsp.writeFile(tmpRels, JSON.stringify(relationships, null, 2), 'utf8')
+      await fsp.rename(tmpRels, relsPath)
+    }
+  } catch (e) {
+    debug('Failed reading relationships file, regenerating', e)
+    relationships = await generateRelationships(transcript, nodes)
+  }
 
   const kumu = toKumuJSON(nodes, relationships)
 
-  const outJsonPath = path.join(TMP_DIR, `${baseName}.kumu.json`)
-  await fsp.writeFile(outJsonPath, JSON.stringify(kumu, null, 2), 'utf8')
+  const kumuPath = path.join(TMP_DIR, `${baseName}.kumu.json`)
+  await fsp.writeFile(kumuPath, JSON.stringify(kumu, null, 2), 'utf8')
 
-  return outJsonPath
+  // Prepare minimal per-base markers and output paths
+  const processingMarker = path.join(TMP_DIR, `${baseName}.processing`)
+  const ttlPath = path.join(TMP_DIR, `${baseName}.triples.ttl`)
+  const jsonldPath = path.join(TMP_DIR, `${baseName}.triples.jsonld`)
+  const mddPath = path.join(TMP_DIR, `${baseName}.mdd`)
+  const svgPath = path.join(TMP_DIR, `${baseName}.svg`)
+
+  // Create processing marker (write timestamp)
+  try {
+    await fsp.writeFile(processingMarker, String(Date.now()), 'utf8')
+  } catch (e) {
+    debug('Could not write processing marker', e)
+  }
+
+  // Export RDF (Turtle + JSON-LD) if missing or empty
+  try {
+    const needTTL = !(await existsNonEmpty(ttlPath))
+    const needJSONLD = !(await existsNonEmpty(jsonldPath))
+    if (needTTL || needJSONLD) {
+      info('Writing RDF outputs for', baseName)
+      await exportRDF(TMP_DIR, baseName, nodes, relationships)
+    } else {
+      debug('RDF outputs already exist for', baseName)
+    }
+  } catch (e: any) {
+    console.warn('Failed to export RDF for', baseName, e?.message ?? e)
+  }
+
+  // Export Mermaid if missing
+  try {
+    const needMDD = !(await existsNonEmpty(mddPath))
+    const needSVG = !(await existsNonEmpty(svgPath))
+    if (needMDD || needSVG) {
+      info('Writing mermaid .mdd for', baseName)
+      await exportMermaid(TMP_DIR, baseName, nodes, relationships)
+    } else {
+      debug('.mdd already exists for', baseName)
+    }
+  } catch (e: any) {
+    console.warn('Failed to export mermaid for', baseName, e?.message ?? e)
+  }
+
+  // Remove processing marker
+  try {
+    await fsp.unlink(processingMarker).catch(() => {})
+  } catch (e) {
+    debug('Could not finalize markers for', baseName, e)
+  }
+
+  return { kumuPath, svgPath }
 }

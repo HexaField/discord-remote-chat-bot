@@ -175,11 +175,15 @@ ${table}`
     }
 
     try {
-      const diagramFilePath = await audioToDiagram(url)
-      const diagramData = await fs.readFile(diagramFilePath, 'utf-8')
+      const { kumuPath, svgPath } = await audioToDiagram(url)
+      const diagramData = await fs.readFile(kumuPath, 'utf-8')
+      const svgData = await fs.readFile(svgPath, 'utf-8')
       return chat.editReply({
         content: 'Here is your diagram for ' + url,
-        files: [new AttachmentBuilder(Buffer.from(diagramData), { name: 'diagram.json' })]
+        files: [
+          new AttachmentBuilder(Buffer.from(diagramData), { name: 'diagram.json' }),
+          new AttachmentBuilder(Buffer.from(svgData), { name: 'diagram.svg' })
+        ]
       })
     } catch (err: any) {
       console.error('diagram handler error', err)

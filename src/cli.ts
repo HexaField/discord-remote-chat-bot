@@ -8,9 +8,9 @@ import {
   generateNodes,
   generateRelationships,
   toKumuJSON,
-  toMermaid,
   transcribeAudioFile
 } from './audioToDiagram'
+import { buildMermaid, exportMermaid } from './exporters/mermaidExporter'
 
 async function cmdTranscribe(input: string, output: string) {
   if (!input || !output) {
@@ -21,8 +21,8 @@ async function cmdTranscribe(input: string, output: string) {
 
   // Download
   if (input.includes('youtube.com') || input.includes('youtu.be')) {
-    await downloadYoutubeAudio(input, output.replace(/\.txt$/i, '.wav'))
-    audioPath = output.replace(/\.txt$/i, '.wav')
+    await downloadYoutubeAudio(input, output.replace(/\.txt$/i, '.mp3'))
+    audioPath = output.replace(/\.txt$/i, '.mp3')
   }
 
   if (!fs.existsSync(audioPath)) throw new Error(`Input not found: ${audioPath}`)
@@ -78,9 +78,19 @@ async function cmdMermaid(input: string, output: string) {
     throw new Error("Input graph must contain arrays 'nodes' and 'relationships' (or 'elements'/'connections')")
   }
 
-  // Convert to mermaid syntax
-  const mermaid = toMermaid(nodes, relationships)
+  // Convert to mermaid syntax and write requested output (.mmd)
+  const mermaid = buildMermaid(nodes, relationships)
   await fsp.writeFile(output, mermaid, 'utf8')
+
+  // Also produce exporter outputs (mdd + svg) beside the output file's directory
+  try {
+    const outDir = path.dirname(output)
+    const base = path.basename(output, path.extname(output))
+    await exportMermaid(outDir, base, nodes, relationships)
+  } catch (e: any) {
+    console.warn('Failed to generate additional mermaid outputs:', e?.message ?? e)
+  }
+
   console.log('Mermaid diagram written to', output)
 }
 
@@ -97,6 +107,7 @@ async function main(argv: string[]) {
       console.log('  transcribe <input.ext> <output.txt>')
       console.log('  diagram <transcript.txt> <graph.json>')
       console.log('  kumu <input.txt> <output.json>')
+      console.log('  mermaid <input.txt> <output.mmd>')
       process.exit(1)
     }
   } catch (err: any) {
