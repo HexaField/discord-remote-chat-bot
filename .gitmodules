@@ -1,0 +1,3 @@
+[submodule "external/system-dynamics-bot"]
+	path = external/system-dynamics-bot
+	url = https://github.com/HexaField/System-Dynamics-Bot
