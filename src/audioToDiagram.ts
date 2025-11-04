@@ -24,7 +24,7 @@ function normalizeCSL(txt: string) {
 export function extractNodes(raw: string) {
   const set = new Set(
     normalizeCSL(raw)
-      .split(',')
+      .split('\n')
       .map((s) => s.trim())
       .filter(Boolean)
   )
@@ -89,39 +89,25 @@ export async function transcribeAudioFile(inputPath: string, transcriptPath: str
   let transcript = await fsp.readFile(transcriptPath, 'utf8')
 
   // Single-call LLM scrub: remove advertising, promos, irrelevant tangents and noise
-  // Do NOT chunk; send the full transcript in one request.
-  try {
-    const scrubSystem = `You are a careful transcript editor. Your task is to remove any content that is not related to the main topic of the recording, such as advertising, sponsorship plugs, calls to action (e.g. "subscribe", "visit my site", "follow me"), promotional segments, long music or silence descriptions, host intros/outros that do not carry topic content, explicit product mentions that are purely promotional, and any tangential chatter that does not add factual or conceptual content about the main subject.
+  // try {
+  //   const scrubSystem = `The following is an audio recording transcription. Remove anything not directly about the recording's main topic. Include minor fixes for obvious split words or misspellings. Remove advertising, sponsor/donation/referral mentions, and calls-to-action (subscribe, follow, visit). Return only the cleaned transcript text (no notes, explanation, or JSON).`
 
-Rules:
-- Keep only content directly relevant to the primary topic discussed in the recording. Remove advertising, sponsor mentions, donation requests, referral codes, and explicit social-media calls-to-action.
-- Remove filler noise words and long verbal hesitations ("um", "uh", repeated stammers) except where they change meaning.
-- Remove time stamps, stage directions, and spoken metadata (e.g., "[music]", "applause", "intro music plays") unless they are integral to the content.
-- Preserve factual statements, explanations, arguments, examples, questions and answers, and any content that advances understanding of the main topic.
-- If the recording contains clear speaker turns that are important to meaning, preserve them using simple labels (e.g., "Host:", "Guest:") only when those labels add clarity. Otherwise produce a clean continuous transcript.
-- Do minimal, conservative editing: do not invent new content, do not add summarization or interpretation, and do not add commentary or meta text.
-- Return only the cleaned transcript text. Do NOT include any explanation, notes, or JSON — only the cleaned transcript itself.
-- If you detect that the transcript is already free of advertising and unrelated content, return it unchanged (but normalized for whitespace).
-- Combine any terms that are obviously mis-transcribed but clearly intended to be a single word (e.g., "You Tube" -> "YouTube", "e mail" -> "email").
-
-Be precise and keep the output suitable for reading and downstream NLP processing.`
-
-    const resp = await callLLM(scrubSystem, transcript, 'llama3.1:8b')
-    if (resp && resp.success && typeof resp.data === 'string' && resp.data.trim().length > 0) {
-      transcript = resp.data.trim()
-      // Persist cleaned transcript to the transcriptPath
-      try {
-        await fsp.writeFile(transcriptPath, transcript, 'utf8')
-        debug('Wrote cleaned transcript to', transcriptPath)
-      } catch (e) {
-        debug('Failed to write cleaned transcript:', e)
-      }
-    } else {
-      debug('LLM scrub returned empty or failed; using original transcript')
-    }
-  } catch (e: any) {
-    console.warn('LLM scrub failed, using raw transcript:', e?.message ?? e)
-  }
+  //   const resp = await callLLM(scrubSystem, transcript, 'llama3.1:8b')
+  //   if (resp && resp.success && typeof resp.data === 'string' && resp.data.trim().length > 0) {
+  //     transcript = resp.data.trim()
+  //     // Persist cleaned transcript to the transcriptPath
+  //     try {
+  //       await fsp.writeFile(transcriptPath, transcript, 'utf8')
+  //       debug('Wrote cleaned transcript to', transcriptPath)
+  //     } catch (e) {
+  //       debug('Failed to write cleaned transcript:', e)
+  //     }
+  //   } else {
+  //     debug('LLM scrub returned empty or failed; using original transcript')
+  //   }
+  // } catch (e: any) {
+  //   console.warn('LLM scrub failed, using raw transcript:', e?.message ?? e)
+  // }
 
   return transcript
 }
@@ -189,7 +175,7 @@ function chunkByNewline(text: string, maxChars: number, minLast: number) {
 }
 
 export async function generateNodes(transcript: string) {
-  const nodesSystem = `You are an assistant that extracts a comma separated list of concepts from a document. Respond with a single comma-separated string.`
+  const nodesSystem = `You are an assistant that extracts a new-line separated list of concepts from a document. These must only be a concept, idea, person or place and never a whole sentence. Do not use underscores, hyphens, or any other punctuation in the concepts unless it is part of the name. Respond with a single new-line separated string.`
 
   const chunks = chunkByNewline(transcript, CHUNK_MAX, CHUNK_MIN)
   const nodeSet = new Set<string>()
@@ -206,7 +192,7 @@ export async function generateNodes(transcript: string) {
 
 export async function generateRelationships(transcript: string, nodes: string[]) {
   // Request JSON array of relationship objects from the LLM.
-  const relsSystemBase = `You are an assistant that extracts relationships from a document given a list of nodes. Respond with a JSON array where each item is an object with keys { "subject": string, "predicate": string, "object": string }. Only include relationships supported by the provided document. The nodes are: ${nodes.join(', ')}.`
+  const relsSystemBase = `You are an assistant that extracts relationships from a document given a list of nodes. Respond with a JSON array where each item is an object with keys { "subject": string, "predicate": string, "object": string }. Only include relationships supported by the provided document. Objects and subjects must be only of the defined nodes, and predicates only a very simple relationship type, not whole sentences. The nodes are: ${nodes.join(', ')}.`
 
   const chunks = chunkByNewline(transcript, CHUNK_MAX, CHUNK_MIN)
   const relMap = new Map<string, Relationship>()
@@ -259,7 +245,18 @@ export async function downloadYoutubeAudio(youtubeURL: string, destPath: string,
     const ytdlp = 'yt-dlp' // Assumes yt-dlp is installed and on PATH
 
     // use lowest quality audio format to minimize download size
-    const args = ['-x', '--audio-quality', 'lowest', '--audio-format', audioFormat, '-o', destPath, youtubeURL]
+    const args = [
+      youtubeURL,
+      '--sponsorblock-remove',
+      'all',
+      '-x',
+      '--audio-quality',
+      'lowest',
+      '--audio-format',
+      audioFormat,
+      '-o',
+      destPath
+    ]
     execFile(ytdlp, args, (error, stdout, stderr) => {
       if (error) {
         return reject(new Error(`yt-dlp error: ${error.message}\n${stderr}`))
