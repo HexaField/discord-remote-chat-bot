@@ -175,14 +175,14 @@ ${table}`
     }
 
     try {
-      const { kumuPath, svgPath } = await audioToDiagram(url)
+      const { kumuPath, pngPath } = await audioToDiagram(url)
       const diagramData = await fs.readFile(kumuPath, 'utf-8')
-      const svgData = await fs.readFile(svgPath, 'utf-8')
+      const pngData = await fs.readFile(pngPath)
       return chat.editReply({
         content: 'Here is your diagram for ' + url,
         files: [
           new AttachmentBuilder(Buffer.from(diagramData), { name: 'diagram.json' }),
-          new AttachmentBuilder(Buffer.from(svgData), { name: 'diagram.svg' })
+          new AttachmentBuilder(pngData, { name: 'diagram.png' })
         ]
       })
     } catch (err: any) {

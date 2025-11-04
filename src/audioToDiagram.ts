@@ -85,7 +85,44 @@ export async function transcribeAudioFile(inputPath: string, transcriptPath: str
   const WHISPER_MODEL = process.env.WHISPER_MODEL || path.join(os.homedir(), 'models/ggml-base.en.bin')
   await transcribeWithWhisper(WHISPER_MODEL, audioPath, transcriptPath, outBase)
 
-  const transcript = await fsp.readFile(transcriptPath, 'utf8')
+  // Read raw transcript
+  let transcript = await fsp.readFile(transcriptPath, 'utf8')
+
+  // Single-call LLM scrub: remove advertising, promos, irrelevant tangents and noise
+  // Do NOT chunk; send the full transcript in one request.
+  try {
+    const scrubSystem = `You are a careful transcript editor. Your task is to remove any content that is not related to the main topic of the recording, such as advertising, sponsorship plugs, calls to action (e.g. "subscribe", "visit my site", "follow me"), promotional segments, long music or silence descriptions, host intros/outros that do not carry topic content, explicit product mentions that are purely promotional, and any tangential chatter that does not add factual or conceptual content about the main subject.
+
+Rules:
+- Keep only content directly relevant to the primary topic discussed in the recording. Remove advertising, sponsor mentions, donation requests, referral codes, and explicit social-media calls-to-action.
+- Remove filler noise words and long verbal hesitations ("um", "uh", repeated stammers) except where they change meaning.
+- Remove time stamps, stage directions, and spoken metadata (e.g., "[music]", "applause", "intro music plays") unless they are integral to the content.
+- Preserve factual statements, explanations, arguments, examples, questions and answers, and any content that advances understanding of the main topic.
+- If the recording contains clear speaker turns that are important to meaning, preserve them using simple labels (e.g., "Host:", "Guest:") only when those labels add clarity. Otherwise produce a clean continuous transcript.
+- Do minimal, conservative editing: do not invent new content, do not add summarization or interpretation, and do not add commentary or meta text.
+- Return only the cleaned transcript text. Do NOT include any explanation, notes, or JSON — only the cleaned transcript itself.
+- If you detect that the transcript is already free of advertising and unrelated content, return it unchanged (but normalized for whitespace).
+- Combine any terms that are obviously mis-transcribed but clearly intended to be a single word (e.g., "You Tube" -> "YouTube", "e mail" -> "email").
+
+Be precise and keep the output suitable for reading and downstream NLP processing.`
+
+    const resp = await callLLM(scrubSystem, transcript, 'llama3.1:8b')
+    if (resp && resp.success && typeof resp.data === 'string' && resp.data.trim().length > 0) {
+      transcript = resp.data.trim()
+      // Persist cleaned transcript to the transcriptPath
+      try {
+        await fsp.writeFile(transcriptPath, transcript, 'utf8')
+        debug('Wrote cleaned transcript to', transcriptPath)
+      } catch (e) {
+        debug('Failed to write cleaned transcript:', e)
+      }
+    } else {
+      debug('LLM scrub returned empty or failed; using original transcript')
+    }
+  } catch (e: any) {
+    console.warn('LLM scrub failed, using raw transcript:', e?.message ?? e)
+  }
+
   return transcript
 }
 
@@ -305,6 +342,22 @@ export default async function audioToDiagram(audioURL: string) {
     relationships = await generateRelationships(transcript, nodes)
   }
 
+  // Filter out any nodes that don't appear in relationships (no subject/object links)
+  try {
+    const relNodeSet = new Set<string>()
+    for (const r of relationships) {
+      if (r.subject) relNodeSet.add(r.subject)
+      if (r.object) relNodeSet.add(r.object)
+    }
+    const before = nodes.length
+    nodes = nodes.filter((n) => relNodeSet.has(n))
+    const after = nodes.length
+    if (before !== after) debug(`Filtered ${before - after} disconnected node(s)`)
+  } catch (e) {
+    // If anything goes wrong, keep the original nodes list to avoid breaking downstream
+    debug('Failed to filter nodes by relationships, keeping original nodes', e)
+  }
+
   const kumu = toKumuJSON(nodes, relationships)
 
   const kumuPath = path.join(TMP_DIR, `${baseName}.kumu.json`)
@@ -314,6 +367,7 @@ export default async function audioToDiagram(audioURL: string) {
   const processingMarker = path.join(TMP_DIR, `${baseName}.processing`)
   const mddPath = path.join(TMP_DIR, `${baseName}.mdd`)
   const svgPath = path.join(TMP_DIR, `${baseName}.svg`)
+  const pngPath = path.join(TMP_DIR, `${baseName}.png`)
 
   // Create processing marker (write timestamp)
   try {
@@ -339,8 +393,9 @@ export default async function audioToDiagram(audioURL: string) {
   try {
     const needMDD = !(await existsNonEmpty(mddPath))
     const needSVG = !(await existsNonEmpty(svgPath))
-    if (needMDD || needSVG) {
-      info('Writing mermaid .mdd for', baseName)
+    const needPNG = !(await existsNonEmpty(pngPath))
+    if (needMDD || needSVG || needPNG) {
+      info('Writing mermaid .mdd, .svg and .png for', baseName)
       await exportMermaid(TMP_DIR, baseName, nodes, relationships)
     } else {
       debug('.mdd already exists for', baseName)
@@ -356,5 +411,5 @@ export default async function audioToDiagram(audioURL: string) {
     debug('Could not finalize markers for', baseName, e)
   }
 
-  return { kumuPath, svgPath }
+  return { kumuPath, svgPath, pngPath }
 }
