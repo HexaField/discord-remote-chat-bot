@@ -7,6 +7,9 @@ const modelSettings = {
   },
   'gpt-oss:20b': {
     maxContext: 32000
+  },
+  'llama3.1:8b': {
+    maxContext: 64000
   }
 } as const
 

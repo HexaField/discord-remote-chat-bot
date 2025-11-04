@@ -7,6 +7,7 @@ import {
   downloadYoutubeAudio,
   generateNodes,
   generateRelationships,
+  Relationship,
   toKumuJSON,
   transcribeAudioFile
 } from './audioToDiagram'
@@ -54,11 +55,37 @@ async function cmdKumu(input: string, output: string) {
   if (!fs.existsSync(input)) throw new Error(`Input not found: ${input}`)
 
   const graph = JSON.parse(await fsp.readFile(input, 'utf8'))
-  const nodes: string[] = graph.nodes ?? graph.elements ?? []
-  const relationships: string[] = graph.relationships ?? graph.connections ?? []
+  const rawNodes: any[] = graph.nodes ?? graph.elements ?? []
+  const rawRels: any[] = graph.relationships ?? graph.connections ?? []
 
-  if (!Array.isArray(nodes) || !Array.isArray(relationships)) {
+  if (!Array.isArray(rawNodes) || !Array.isArray(rawRels)) {
     throw new Error("Input graph must contain arrays 'nodes' and 'relationships' (or 'elements'/'connections')")
+  }
+
+  const nodes: string[] = rawNodes
+    .map((n: any) => (typeof n === 'string' ? n : (n.label ?? n.name ?? String(n))))
+    .filter(Boolean)
+
+  const relationships: Relationship[] = []
+  for (const r of rawRels) {
+    if (!r) continue
+    if (typeof r === 'object') {
+      if ('subject' in r && 'predicate' in r && 'object' in r) {
+        relationships.push({ subject: String(r.subject), predicate: String(r.predicate), object: String(r.object) })
+        continue
+      }
+      // support connection-style objects { from, to, label }
+      if ('from' in r && 'to' in r) {
+        relationships.push({
+          subject: String(r.from),
+          predicate: String(r.label ?? r.predicate ?? ''),
+          object: String(r.to)
+        })
+        continue
+      }
+    }
+    // do not accept legacy string relationship format for CLI input
+    throw new Error('Relationships must be objects with {subject,predicate,object} or {from,to,label}')
   }
 
   const kumu = toKumuJSON(nodes, relationships)
@@ -71,11 +98,34 @@ async function cmdMermaid(input: string, output: string) {
   if (!fs.existsSync(input)) throw new Error(`Input not found: ${input}`)
 
   const graph = JSON.parse(await fsp.readFile(input, 'utf8'))
-  const nodes: string[] = graph.nodes ?? graph.elements ?? []
-  const relationships: string[] = graph.relationships ?? graph.connections ?? []
+  const rawNodes: any[] = graph.nodes ?? graph.elements ?? []
+  const rawRels: any[] = graph.relationships ?? graph.connections ?? []
 
-  if (!Array.isArray(nodes) || !Array.isArray(relationships)) {
+  if (!Array.isArray(rawNodes) || !Array.isArray(rawRels)) {
     throw new Error("Input graph must contain arrays 'nodes' and 'relationships' (or 'elements'/'connections')")
+  }
+
+  const nodes: string[] = rawNodes
+    .map((n: any) => (typeof n === 'string' ? n : (n.label ?? n.name ?? String(n))))
+    .filter(Boolean)
+  const relationships: Relationship[] = []
+  for (const r of rawRels) {
+    if (!r) continue
+    if (typeof r === 'object') {
+      if ('subject' in r && 'predicate' in r && 'object' in r) {
+        relationships.push({ subject: String(r.subject), predicate: String(r.predicate), object: String(r.object) })
+        continue
+      }
+      if ('from' in r && 'to' in r) {
+        relationships.push({
+          subject: String(r.from),
+          predicate: String(r.label ?? r.predicate ?? ''),
+          object: String(r.to)
+        })
+        continue
+      }
+    }
+    throw new Error('Relationships must be objects with {subject,predicate,object} or {from,to,label}')
   }
 
   // Convert to mermaid syntax and write requested output (.mmd)

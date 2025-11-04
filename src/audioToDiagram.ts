@@ -4,7 +4,7 @@ import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { exportMermaid } from './exporters/mermaidExporter'
-import { exportRDF } from './exporters/rdfExporter'
+import { exportRDF, parseTTL } from './exporters/rdfExporter'
 import { convertTo16kMonoWav, ensureFfmpegAvailable } from './ffmpeg'
 import { callLLM } from './llm'
 import { debug, info } from './logger'
@@ -38,28 +38,17 @@ export function extractRelationships(raw: string) {
     .filter(Boolean)
 }
 
-export function toKumuJSON(nodes: string[], relationships: string[]) {
+export type Relationship = { subject: string; predicate: string; object: string }
+
+export function toKumuJSON(nodes: string[], relationships: Relationship[]) {
   const elements = Array.from(new Set(nodes)).map((label) => ({ label }))
 
   const connections: Array<{ from: string; to: string; label?: string }> = []
   for (const rel of relationships) {
-    let parts = rel
-      .split(/-+>|—|–/g)
-      .map((s) => s.trim())
-      .filter(Boolean)
-    if (parts.length !== 3) {
-      const p2 = rel
-        .split('-')
-        .map((s) => s.trim())
-        .filter(Boolean)
-      if (p2.length >= 3) {
-        parts = [p2.shift() as string, p2.slice(0, -1).join('-'), p2.pop() as string]
-      }
-    }
-    if (parts.length === 3) {
-      const [from, label, to] = parts
-      if (from && to) connections.push({ from, to, label })
-    }
+    const from = rel.subject
+    const to = rel.object
+    const label = rel.predicate
+    if (from && to) connections.push({ from, to, label })
   }
 
   const elementLabels = new Set(elements.map((e) => e.label))
@@ -100,24 +89,125 @@ export async function transcribeAudioFile(inputPath: string, transcriptPath: str
   return transcript
 }
 
+// Chunking parameters (can be tuned via env)
+const CHUNK_MAX = Number(process.env.LLM_CHUNK_MAX || '3000')
+const CHUNK_MIN = Number(process.env.LLM_CHUNK_MIN || '200')
+
+function chunkByNewline(text: string, maxChars: number, minLast: number) {
+  const lines = text.split(/\r?\n/)
+  const chunks: string[] = []
+  let curLines: string[] = []
+  let curLen = 0
+  const overlapChars = Math.max(1, Math.floor(maxChars * 0.1))
+
+  for (const line of lines) {
+    const addLen = (curLines.length > 0 ? 1 : 0) + line.length
+    const candidateLen = curLen + addLen
+    if (candidateLen > maxChars) {
+      if (curLines.length > 0) {
+        const chunk = curLines.join('\n')
+        chunks.push(chunk)
+
+        // compute overlap as last lines whose cumulative length >= overlapChars
+        let acc = 0
+        let overlapStart = curLines.length
+        for (let j = curLines.length - 1; j >= 0; j--) {
+          acc += curLines[j].length + 1 // include newline
+          overlapStart = j
+          if (acc >= overlapChars) break
+        }
+        const overlapLines = curLines.slice(overlapStart)
+
+        // start new curLines with the overlap then add the current line
+        curLines = overlapLines.slice()
+        curLen = curLines.length > 0 ? curLines.join('\n').length : 0
+        if (curLines.length > 0) {
+          curLen += 1 + line.length
+          curLines.push(line)
+        } else {
+          curLines = [line]
+          curLen = line.length
+        }
+      } else {
+        // single line longer than maxChars: force split the line
+        chunks.push(line.slice(0, maxChars))
+        const leftover = line.slice(maxChars)
+        curLines = leftover ? [leftover] : []
+        curLen = leftover.length
+      }
+    } else {
+      if (curLines.length > 0) curLen += 1 + line.length
+      else curLen = line.length
+      curLines.push(line)
+    }
+  }
+
+  if (curLines.length > 0) chunks.push(curLines.join('\n'))
+
+  if (chunks.length > 1 && chunks[chunks.length - 1].length < minLast) {
+    const last = chunks.pop() as string
+    chunks[chunks.length - 1] = chunks[chunks.length - 1] + '\n' + last
+  }
+  return chunks
+}
+
 export async function generateNodes(transcript: string) {
   const nodesSystem = `You are an assistant that extracts a comma separated list of concepts from a document. Respond with a single comma-separated string.`
-  const rawNodesResp = await callLLM(nodesSystem, transcript, 'gpt-oss:20b')
-  if (!rawNodesResp.success) throw new Error(rawNodesResp.error || 'LLM failed extracting nodes')
-  const rawNodesText = String(rawNodesResp.data || '')
-  const nodes = extractNodes(rawNodesText)
-  return nodes
+
+  const chunks = chunkByNewline(transcript, CHUNK_MAX, CHUNK_MIN)
+  const nodeSet = new Set<string>()
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i]
+    const prompt = `${nodesSystem}\n\n${chunk}`
+    const resp = await callLLM(prompt, '', 'llama3.1:8b')
+    if (!resp.success) throw new Error(resp.error || 'LLM failed extracting nodes')
+    const raw = String(resp.data || '')
+    for (const n of extractNodes(raw)) nodeSet.add(n)
+  }
+  return Array.from(nodeSet)
 }
 
 export async function generateRelationships(transcript: string, nodes: string[]) {
-  const relsSystem = `You are an assistant that extracts relationships from a list of nodes given a transcript. Respond with a comma separated list. Each relationship must be in the form 'from node-relationship label-to node'. Only include relationships supported by the provided document. The nodes are: ${nodes.join(
-    ', '
-  )}.`
-  const rawRelsResp = await callLLM(relsSystem, transcript, 'gpt-oss:20b')
-  if (!rawRelsResp.success) throw new Error(rawRelsResp.error || 'LLM failed extracting relationships')
-  const rawRelsText = String(rawRelsResp.data || '')
-  const relationships = extractRelationships(rawRelsText)
-  return relationships
+  // Request JSON array of relationship objects from the LLM.
+  const relsSystemBase = `You are an assistant that extracts relationships from a document given a list of nodes. Respond with a JSON array where each item is an object with keys { "subject": string, "predicate": string, "object": string }. Only include relationships supported by the provided document. The nodes are: ${nodes.join(', ')}.`
+
+  const chunks = chunkByNewline(transcript, CHUNK_MAX, CHUNK_MIN)
+  const relMap = new Map<string, Relationship>()
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i]
+    const prompt = `${relsSystemBase}\n\n${chunk}`
+    const resp = await callLLM(prompt, '', 'llama3.1:8b')
+    if (!resp.success) throw new Error(resp.error || 'LLM failed extracting relationships')
+    const raw = String(resp.data || '')
+
+    // Try to pull a JSON array from the response
+    let parsed: any = null
+    try {
+      const first = raw.indexOf('[')
+      const last = raw.lastIndexOf(']')
+      if (first >= 0 && last > first) {
+        parsed = JSON.parse(raw.slice(first, last + 1))
+      } else {
+        parsed = JSON.parse(raw)
+      }
+    } catch (e) {
+      // Could not parse JSON from this chunk, skip it
+      continue
+    }
+
+    if (!Array.isArray(parsed)) continue
+    for (const item of parsed) {
+      if (!item || typeof item !== 'object') continue
+      const subject = String(item.subject || '').trim()
+      const predicate = String(item.predicate || '').trim()
+      const object = String(item.object || '').trim()
+      if (!subject || !predicate || !object) continue
+      const key = `${subject}|||${predicate}|||${object}`
+      relMap.set(key, { subject, predicate, object })
+    }
+  }
+
+  return Array.from(relMap.values())
 }
 
 export async function downloadYoutubeAudio(youtubeURL: string, destPath: string, audioFormat = 'mp3') {
@@ -166,8 +256,7 @@ export default async function audioToDiagram(audioURL: string) {
     originalName.endsWith(`.${audioFormat}`) ? originalName : `${baseName}.${audioFormat}`
   )
   const transcriptPath = path.join(TMP_DIR, `${baseName}.txt`)
-  const nodesPath = path.join(TMP_DIR, `${baseName}.nodes.json`)
-  const relsPath = path.join(TMP_DIR, `${baseName}.relationships.json`)
+  const ttlPath = path.join(TMP_DIR, `${baseName}.triples.ttl`)
 
   // Download
   if (audioURL.includes('youtube.com') || audioURL.includes('youtu.be')) {
@@ -195,41 +284,24 @@ export default async function audioToDiagram(audioURL: string) {
     transcript = await transcribeAudioFile(audioPath, transcriptPath)
   }
 
-  // Generate nodes and relationships
-  // Load or generate nodes
-  let nodes: string[]
-  try {
-    if (await existsNonEmpty(nodesPath)) {
-      debug('Loading existing nodes from', nodesPath)
-      const raw = await fsp.readFile(nodesPath, 'utf8')
-      nodes = JSON.parse(raw) as string[]
-    } else {
-      nodes = await generateNodes(transcript)
-      // atomic write nodes
-      const tmpNodes = path.join(TMP_DIR, `.${baseName}.nodes.json.partial`)
-      await fsp.writeFile(tmpNodes, JSON.stringify(nodes, null, 2), 'utf8')
-      await fsp.rename(tmpNodes, nodesPath)
-    }
-  } catch (e) {
-    debug('Failed reading nodes file, regenerating', e)
-    nodes = await generateNodes(transcript)
-  }
+  // Generate nodes and relationships. If a TTL exists, parse it and use that as the source of truth.
 
-  // Load or generate relationships
-  let relationships: string[]
-  try {
-    if (await existsNonEmpty(relsPath)) {
-      debug('Loading existing relationships from', relsPath)
-      const raw = await fsp.readFile(relsPath, 'utf8')
-      relationships = JSON.parse(raw) as string[]
-    } else {
+  let nodes: string[]
+  let relationships: Relationship[]
+  if (await existsNonEmpty(ttlPath)) {
+    try {
+      const ttl = await fsp.readFile(ttlPath, 'utf8')
+      const parsed = await parseTTL(ttl)
+      nodes = parsed.nodes
+      relationships = parsed.relationships
+      debug('Loaded nodes and relationships from TTL', ttlPath)
+    } catch (e) {
+      debug('Failed to parse TTL, regenerating nodes/relationships', e)
+      nodes = await generateNodes(transcript)
       relationships = await generateRelationships(transcript, nodes)
-      const tmpRels = path.join(TMP_DIR, `.${baseName}.relationships.json.partial`)
-      await fsp.writeFile(tmpRels, JSON.stringify(relationships, null, 2), 'utf8')
-      await fsp.rename(tmpRels, relsPath)
     }
-  } catch (e) {
-    debug('Failed reading relationships file, regenerating', e)
+  } else {
+    nodes = await generateNodes(transcript)
     relationships = await generateRelationships(transcript, nodes)
   }
 
@@ -240,8 +312,6 @@ export default async function audioToDiagram(audioURL: string) {
 
   // Prepare minimal per-base markers and output paths
   const processingMarker = path.join(TMP_DIR, `${baseName}.processing`)
-  const ttlPath = path.join(TMP_DIR, `${baseName}.triples.ttl`)
-  const jsonldPath = path.join(TMP_DIR, `${baseName}.triples.jsonld`)
   const mddPath = path.join(TMP_DIR, `${baseName}.mdd`)
   const svgPath = path.join(TMP_DIR, `${baseName}.svg`)
 
@@ -252,11 +322,10 @@ export default async function audioToDiagram(audioURL: string) {
     debug('Could not write processing marker', e)
   }
 
-  // Export RDF (Turtle + JSON-LD) if missing or empty
+  // Export RDF (Turtle) if missing or empty
   try {
     const needTTL = !(await existsNonEmpty(ttlPath))
-    const needJSONLD = !(await existsNonEmpty(jsonldPath))
-    if (needTTL || needJSONLD) {
+    if (needTTL) {
       info('Writing RDF outputs for', baseName)
       await exportRDF(TMP_DIR, baseName, nodes, relationships)
     } else {

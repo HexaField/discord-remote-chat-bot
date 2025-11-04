@@ -19,32 +19,21 @@ async function atomicWrite(filePath: string, data: string) {
  * @param relationships The relationships between the nodes.
  * @returns The Mermaid diagram definition as a string.
  */
-export function buildMermaid(nodes: string[], relationships: string[]) {
+export function buildMermaid(
+  nodes: string[],
+  relationships: Array<{ subject: string; predicate: string; object: string }>
+) {
   const sanitize = sanitizeId
   const uniqueNodes = Array.from(new Set(nodes))
   const nodeLines = uniqueNodes.map((n) => `${sanitize(n)}["${n.replace(/\"/g, '\\"')}"]`)
 
   const edgeLines: string[] = []
   for (const rel of relationships) {
-    let parts = rel
-      .split(/-+>|—|–/g)
-      .map((s) => s.trim())
-      .filter(Boolean)
-    if (parts.length === 3) {
-      const [from, label, to] = parts
-      edgeLines.push(`${sanitize(from)} -- "${label.replace(/\"/g, '\\"')}" --> ${sanitize(to)}`)
-    } else {
-      const p2 = rel
-        .split('-')
-        .map((s) => s.trim())
-        .filter(Boolean)
-      if (p2.length >= 3) {
-        const from = p2.shift()!
-        const to = p2.pop()!
-        const label = p2.join('-')
-        edgeLines.push(`${sanitize(from)} -- "${label.replace(/\"/g, '\\"')}" --> ${sanitize(to)}`)
-      }
-    }
+    if (!rel || typeof rel !== 'object') continue
+    const from = rel.subject || ''
+    const to = rel.object || ''
+    const label = rel.predicate || ''
+    if (from && to) edgeLines.push(`${sanitize(from)} -- "${String(label).replace(/\"/g, '\\"')}" --> ${sanitize(to)}`)
   }
 
   return ['graph TD', ...nodeLines, ...edgeLines].join('\n') + '\n'
@@ -58,7 +47,12 @@ export function buildMermaid(nodes: string[], relationships: string[]) {
  * @param relationships The relationships between the nodes.
  * @returns An object containing the paths to the generated files.
  */
-export async function exportMermaid(dir: string, baseName: string, nodes: string[], relationships: string[]) {
+export async function exportMermaid(
+  dir: string,
+  baseName: string,
+  nodes: string[],
+  relationships: Array<{ subject: string; predicate: string; object: string }>
+) {
   await fsp.mkdir(dir, { recursive: true })
 
   const chart = buildMermaid(nodes, relationships)
