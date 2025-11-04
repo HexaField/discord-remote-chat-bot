@@ -70,4 +70,7 @@ This command reuses the same pipeline as the CLI, so results should match betwee
 
 # Todo
 
-- render mermaid diagrams to image file with https://github.com/mermaid-js/mermaid-cli
+- [ ] provenance tracking (include timestamp and source URL in nodes/relationships)
+- [ ] multi-source aggregation (ingest multiple audio files into a single graph)
+- [ ] better node & relationship extraction
+- [ ] better causal loop diagram analysis (detect feedback loops, delays, flows)
