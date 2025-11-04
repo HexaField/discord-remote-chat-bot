@@ -192,7 +192,7 @@ export async function generateNodes(transcript: string) {
 
 export async function generateRelationships(transcript: string, nodes: string[]) {
   // Request JSON array of relationship objects from the LLM.
-  const relsSystemBase = `You are an assistant that extracts relationships from a document given a list of nodes. Respond with a JSON array where each item is an object with keys { "subject": string, "predicate": string, "object": string }. Only include relationships supported by the provided document. Objects and subjects must be only of the defined nodes, and predicates only a very simple relationship type, not whole sentences. The nodes are: ${nodes.join(', ')}.`
+  const relsSystemBase = `You are an assistant that extracts relationships from a document given a list of nodes. Respond with a JSON array where each item is an object with keys { "subject": string, "predicate": string, "object": string }. Only include relationships supported by the provided document. Objects and subjects must be of the defined nodes, and predicates only a very simple relationship type, not whole sentences. The nodes are: ${nodes.join(', ')}.`
 
   const chunks = chunkByNewline(transcript, CHUNK_MAX, CHUNK_MIN)
   const relMap = new Map<string, Relationship>()
@@ -206,14 +206,6 @@ export async function generateRelationships(transcript: string, nodes: string[])
     // Try to pull a JSON array from the response
     let parsed: any = null
     try {
-      const first = raw.indexOf('[')
-      const last = raw.lastIndexOf(']')
-      if (first >= 0 && last > first) {
-        parsed = JSON.parse(raw.slice(first, last + 1))
-      } else {
-        parsed = JSON.parse(raw)
-      }
-    } catch (e) {
       // try extract ```json ... ``` block
       const jsonBlockMatch = raw.match(/```json([\s\S]*?)```/)
       if (jsonBlockMatch) {
@@ -224,7 +216,18 @@ export async function generateRelationships(transcript: string, nodes: string[])
           console.debug('Failed to parse JSON from extracted block:', e)
         }
       }
-
+    } catch (e) {
+      try {
+        const first = raw.indexOf('[')
+        const last = raw.lastIndexOf(']')
+        if (first >= 0 && last > first) {
+          parsed = JSON.parse(raw.slice(first, last + 1))
+        } else {
+          parsed = JSON.parse(raw)
+        }
+      } catch (e) {
+        console.debug('Failed to parse JSON from raw response:', e)
+      }
       // Could not parse JSON from this chunk, skip it
       console.debug('Failed to parse JSON relationships from LLM response chunk ' + i)
       continue
