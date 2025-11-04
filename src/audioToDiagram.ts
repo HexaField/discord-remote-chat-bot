@@ -214,7 +214,19 @@ export async function generateRelationships(transcript: string, nodes: string[])
         parsed = JSON.parse(raw)
       }
     } catch (e) {
+      // try extract ```json ... ``` block
+      const jsonBlockMatch = raw.match(/```json([\s\S]*?)```/)
+      if (jsonBlockMatch) {
+        try {
+          parsed = JSON.parse(jsonBlockMatch[1].trim())
+        } catch (e) {
+          // still failed, will skip
+          console.debug('Failed to parse JSON from extracted block:', e)
+        }
+      }
+
       // Could not parse JSON from this chunk, skip it
+      console.debug('Failed to parse JSON relationships from LLM response chunk ' + i)
       continue
     }
 
