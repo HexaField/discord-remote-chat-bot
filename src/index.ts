@@ -181,7 +181,7 @@ ${table}`
       return chat.editReply({
         content: 'Here is your diagram for ' + url,
         files: [
-          new AttachmentBuilder(Buffer.from(diagramData), { name: 'diagram.json' }),
+          new AttachmentBuilder(Buffer.from(diagramData), { name: 'kumu.json' }),
           new AttachmentBuilder(pngData, { name: 'diagram.png' })
         ]
       })
