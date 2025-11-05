@@ -9,6 +9,7 @@ import { convertTo16kMonoWav, ensureFfmpegAvailable } from './ffmpeg'
 import { callLLM } from './llm'
 import { debug, info } from './logger'
 import { ensureWhisperAvailable, transcribeWithWhisper } from './whisper'
+import { generateWithSystemDynamicsTS } from './systemDynamics'
 
 const TMP_DIR = path.resolve(appRootPath.path, '.tmp/audio-to-diagram')
 
@@ -346,12 +347,44 @@ export default async function audioToDiagram(audioURL: string) {
       debug('Loaded nodes and relationships from TTL', ttlPath)
     } catch (e) {
       debug('Failed to parse TTL, regenerating nodes/relationships', e)
+      const useSDB = Boolean(process.env.USE_SYSTEM_DYNAMICS_TS)
+      if (useSDB) {
+        try {
+          const sdb = await generateWithSystemDynamicsTS(transcript, baseName, {
+            llmModel: process.env.SDB_LLM_MODEL,
+            embeddingModel: process.env.SDB_EMBEDDING_MODEL
+          })
+          nodes = sdb.nodes
+          relationships = sdb.relationships
+        } catch (err) {
+          console.warn('System-Dynamics-Bot failed; falling back to LLM-based extraction:', (err as any)?.message || err)
+          nodes = await generateNodes(transcript)
+          relationships = await generateRelationships(transcript, nodes)
+        }
+      } else {
+        nodes = await generateNodes(transcript)
+        relationships = await generateRelationships(transcript, nodes)
+      }
+    }
+  } else {
+    const useSDB = Boolean(process.env.USE_SYSTEM_DYNAMICS_TS)
+    if (useSDB) {
+      try {
+        const sdb = await generateWithSystemDynamicsTS(transcript, baseName, {
+          llmModel: process.env.SDB_LLM_MODEL,
+          embeddingModel: process.env.SDB_EMBEDDING_MODEL
+        })
+        nodes = sdb.nodes
+        relationships = sdb.relationships
+      } catch (err) {
+        console.warn('System-Dynamics-Bot failed; falling back to LLM-based extraction:', (err as any)?.message || err)
+        nodes = await generateNodes(transcript)
+        relationships = await generateRelationships(transcript, nodes)
+      }
+    } else {
       nodes = await generateNodes(transcript)
       relationships = await generateRelationships(transcript, nodes)
     }
-  } else {
-    nodes = await generateNodes(transcript)
-    relationships = await generateRelationships(transcript, nodes)
   }
 
   // Filter out any nodes that don't appear in relationships (no subject/object links)
