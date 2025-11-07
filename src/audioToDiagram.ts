@@ -8,8 +8,8 @@ import { exportRDF, parseTTL } from './exporters/rdfExporter'
 import { convertTo16kMonoWav, ensureFfmpegAvailable } from './ffmpeg'
 import { callLLM } from './llm'
 import { debug, info } from './logger'
-import { ensureWhisperAvailable, transcribeWithWhisper } from './whisper'
 import { generateWithSystemDynamicsTS } from './systemDynamics'
+import { ensureWhisperAvailable, transcribeWithWhisper } from './whisper'
 
 const TMP_DIR = path.resolve(appRootPath.path, '.tmp/audio-to-diagram')
 
@@ -176,14 +176,13 @@ function chunkByNewline(text: string, maxChars: number, minLast: number) {
 }
 
 export async function generateNodes(transcript: string) {
-  const nodesSystem = `You are an assistant that extracts a new-line separated list of concepts from a document. These must only be a concept, idea, person or place and never a whole sentence. Do not use underscores, hyphens, or any other punctuation in the concepts unless it is part of the name. Respond with a single new-line separated string.`
+  const prompt = `You are an assistant that extracts a new-line separated list of concepts from a document. These must only be a concept, idea, person or place and never a whole sentence. Do not use underscores, hyphens, or any other punctuation in the concepts unless it is part of the name. Respond with a single new-line separated string.`
 
   const chunks = chunkByNewline(transcript, CHUNK_MAX, CHUNK_MIN)
   const nodeSet = new Set<string>()
   for (let i = 0; i < chunks.length; i++) {
     const chunk = chunks[i]
-    const prompt = `${nodesSystem}\n\n${chunk}`
-    const resp = await callLLM(prompt, '', 'llama3.1:8b')
+    const resp = await callLLM(prompt, chunk, 'opencode', 'github-copilot/gpt-5-mini')
     if (!resp.success) throw new Error(resp.error || 'LLM failed extracting nodes')
     const raw = String(resp.data || '')
     for (const n of extractNodes(raw)) nodeSet.add(n)
@@ -193,14 +192,13 @@ export async function generateNodes(transcript: string) {
 
 export async function generateRelationships(transcript: string, nodes: string[]) {
   // Request JSON array of relationship objects from the LLM.
-  const relsSystemBase = `You are an assistant that extracts relationships from a document given a list of nodes. Respond with a JSON array where each item is an object with keys { "subject": string, "predicate": string, "object": string }. Only include relationships supported by the provided document. Objects and subjects must be of the defined nodes, and predicates only a very simple relationship type, not whole sentences. The nodes are: ${nodes.join(', ')}.`
+  const prompt = `You are an assistant that extracts relationships from a document given a list of nodes. Respond with a JSON array where each item is an object with keys { "subject": string, "predicate": string, "object": string }. Only include relationships supported by the provided document. Objects and subjects must be of the defined nodes, and predicates only a very simple relationship type, not whole sentences. The nodes are: ${nodes.join(', ')}.`
 
   const chunks = chunkByNewline(transcript, CHUNK_MAX, CHUNK_MIN)
   const relMap = new Map<string, Relationship>()
   for (let i = 0; i < chunks.length; i++) {
     const chunk = chunks[i]
-    const prompt = `${relsSystemBase}\n\n${chunk}`
-    const resp = await callLLM(prompt, '', 'llama3.1:8b')
+    const resp = await callLLM(prompt, chunk, 'opencode', 'github-copilot/gpt-5-mini')
     if (!resp.success) throw new Error(resp.error || 'LLM failed extracting relationships')
     const raw = String(resp.data || '')
 
@@ -357,7 +355,10 @@ export default async function audioToDiagram(audioURL: string) {
           nodes = sdb.nodes
           relationships = sdb.relationships
         } catch (err) {
-          console.warn('System-Dynamics-Bot failed; falling back to LLM-based extraction:', (err as any)?.message || err)
+          console.warn(
+            'System-Dynamics-Bot failed; falling back to LLM-based extraction:',
+            (err as any)?.message || err
+          )
           nodes = await generateNodes(transcript)
           relationships = await generateRelationships(transcript, nodes)
         }
