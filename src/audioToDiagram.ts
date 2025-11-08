@@ -3,12 +3,12 @@ import { execFile } from 'node:child_process'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { generateCausalRelationships } from './cld'
 import { exportMermaid } from './exporters/mermaidExporter'
 import { exportRDF, parseTTL } from './exporters/rdfExporter'
 import { convertTo16kMonoWav, ensureFfmpegAvailable } from './ffmpeg'
 import { callLLM } from './llm'
 import { debug, info } from './logger'
-import { generateWithSystemDynamicsTS } from './systemDynamics'
 import { ensureWhisperAvailable, transcribeWithWhisper } from './whisper'
 
 const TMP_DIR = path.resolve(appRootPath.path, '.tmp/audio-to-diagram')
@@ -345,15 +345,21 @@ export default async function audioToDiagram(audioURL: string) {
       debug('Loaded nodes and relationships from TTL', ttlPath)
     } catch (e) {
       debug('Failed to parse TTL, regenerating nodes/relationships', e)
-      const useSDB = Boolean(process.env.USE_SYSTEM_DYNAMICS_TS)
+      const useSDB = true // Boolean(process.env.USE_SYSTEM_DYNAMICS_TS)
       if (useSDB) {
         try {
-          const sdb = await generateWithSystemDynamicsTS(transcript, baseName, {
-            llmModel: process.env.SDB_LLM_MODEL,
-            embeddingModel: process.env.SDB_EMBEDDING_MODEL
-          })
-          nodes = sdb.nodes
-          relationships = sdb.relationships
+          const cld = await generateCausalRelationships(
+            transcript,
+            0.85,
+            true,
+            process.env.SDB_LLM_MODEL,
+            process.env.SDB_EMBEDDING_MODEL
+          )
+          if (cld.nodes.length === 0 || cld.relationships.length === 0) {
+            throw new Error('Failed to extract any nodes or relationships')
+          }
+          nodes = cld.nodes
+          relationships = cld.relationships
         } catch (err) {
           console.warn(
             'System-Dynamics-Bot failed; falling back to LLM-based extraction:',
@@ -368,15 +374,21 @@ export default async function audioToDiagram(audioURL: string) {
       }
     }
   } else {
-    const useSDB = Boolean(process.env.USE_SYSTEM_DYNAMICS_TS)
+    const useSDB = true //Boolean(process.env.USE_SYSTEM_DYNAMICS_TS)
     if (useSDB) {
       try {
-        const sdb = await generateWithSystemDynamicsTS(transcript, baseName, {
-          llmModel: process.env.SDB_LLM_MODEL,
-          embeddingModel: process.env.SDB_EMBEDDING_MODEL
-        })
-        nodes = sdb.nodes
-        relationships = sdb.relationships
+        const cld = await generateCausalRelationships(
+          transcript,
+          0.85,
+          true,
+          process.env.SDB_LLM_MODEL,
+          process.env.SDB_EMBEDDING_MODEL
+        )
+        if (cld.nodes.length === 0 || cld.relationships.length === 0) {
+          throw new Error('Failed to extract any nodes or relationships')
+        }
+        nodes = cld.nodes
+        relationships = cld.relationships
       } catch (err) {
         console.warn('System-Dynamics-Bot failed; falling back to LLM-based extraction:', (err as any)?.message || err)
         nodes = await generateNodes(transcript)

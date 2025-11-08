@@ -1,3 +1,4 @@
+import axios from 'axios'
 import { spawn } from 'child_process'
 import ollama from 'ollama'
 import { debug } from './logger'
@@ -151,15 +152,17 @@ async function callOpencodeCLI(systemPrompt: string, userQuery: string, model: s
 
   // Use the `run` subcommand with the prompt as a positional argument and request JSON output.
   const res = await runCLI('opencode', ['run', combined, '-m', modelToUse, '--format', 'json'], '')
-  console.log('Opencode CLI output:', res)
+  debug('Opencode CLI output:', res.split('\n').map(extractOrCreateJSON))
 
   const finalRes = res
     .split('\n')
     .map(extractOrCreateJSON)
-    .reverse()
-    .find((obj) => obj && typeof obj === 'object' && obj.type === 'text' && obj.text).text.text
-  console.log('finalRes:', finalRes)
-  return finalRes
+    .reverse() // get last
+    .find((obj) => (obj && typeof obj === 'object' && obj.type === 'text' && obj.part) || obj.text)
+
+  const text = finalRes?.part?.text ?? finalRes?.text?.text ?? ''
+  debug('finalRes:', text)
+  return text
 }
 
 async function callGooseCLI(systemPrompt: string, userQuery: string, model: string): Promise<string> {
@@ -174,7 +177,7 @@ async function callGooseCLI(systemPrompt: string, userQuery: string, model: stri
   // Use quiet mode if available to reduce extra output
 
   const out = await runCLI('goose', args, '')
-  console.log('Goose CLI output:', out)
+  debug('Goose CLI output:', out)
   return out
 }
 
@@ -198,8 +201,7 @@ export async function callLLM(
   model = 'llama3.2',
   retries = 2
 ): Promise<LLMResponse> {
-  const combinedText = `${systemPrompt}\n${userQuery}`
-  const tokenCount = combinedText.length / 4 // rough estimate
+  const tokenCount = (systemPrompt.length + userQuery.length) / 4 // rough estimate
 
   debug('LLM token count', tokenCount)
   if (tokenCount > 0 && tokenCount > MODEL_MAX_CTX) {
@@ -224,7 +226,7 @@ export async function callLLM(
         throw new Error(`Unsupported LLM provider: ${provider}`)
       }
 
-      debug('LLM raw response', raw)
+      debug('LLM', provider, model, 'raw response', raw)
 
       const parsed = extractOrCreateJSON(raw)
       const fenced = wrapAsJSONCodeFence(parsed)
@@ -242,4 +244,35 @@ export async function callLLM(
   }
 
   return { success: false, error: String(lastErr) }
+}
+
+const OLLAMA_URL = process.env.OLLAMA_URL || 'http://localhost:11434'
+
+// getEmbedding now uses Ollama exclusively - no fallbacks
+export async function getEmbedding(text: string, model?: string) {
+  const clean = text.replace(/\n/g, ' ')
+  const embedModel = model || process.env.OLLAMA_EMBEDDING_MODEL || 'bge-m3:latest'
+  const payload = { model: embedModel, input: clean }
+
+  try {
+    const resp = await axios.post(`${OLLAMA_URL}/api/embed`, payload, { timeout: 60000 })
+    const data = resp.data
+
+    // Ollama /api/embed response format: { "embeddings": [[...]] }
+    if (data && Array.isArray(data.embeddings) && data.embeddings[0] && Array.isArray(data.embeddings[0])) {
+      return data.embeddings[0]
+    }
+
+    // No fallbacks - fail immediately if embeddings not available
+    throw new Error(
+      `Embeddings API returned unexpected format for model ${embedModel}. Response: ${JSON.stringify(data)}. Ensure Ollama is running at ${OLLAMA_URL} and the model supports embeddings.`
+    )
+  } catch (error: any) {
+    if (error.response) {
+      throw new Error(
+        `Ollama embeddings API error (${error.response.status}): ${JSON.stringify(error.response.data)}. Ensure model ${embedModel} is installed (run: ollama pull ${embedModel}) and Ollama is running at ${OLLAMA_URL}.`
+      )
+    }
+    throw error
+  }
 }
