@@ -4,7 +4,8 @@ import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { generateCausalRelationships } from './cld'
-import { exportMermaid } from './exporters/mermaidExporter'
+import { exportGraphViz } from './exporters/graphVizExporter'
+import exportMermaid from './exporters/mermaidExporter'
 import { exportRDF, parseTTL } from './exporters/rdfExporter'
 import { convertTo16kMonoWav, ensureFfmpegAvailable } from './ffmpeg'
 import { callLLM } from './llm'
@@ -336,68 +337,72 @@ export default async function audioToDiagram(audioURL: string) {
 
   let nodes: string[]
   let relationships: Relationship[]
+  let statements: string[] = []
   if (await existsNonEmpty(ttlPath)) {
     try {
       const ttl = await fsp.readFile(ttlPath, 'utf8')
       const parsed = await parseTTL(ttl)
       nodes = parsed.nodes
       relationships = parsed.relationships
+      statements = parsed.statements
       debug('Loaded nodes and relationships from TTL', ttlPath)
     } catch (e) {
       debug('Failed to parse TTL, regenerating nodes/relationships', e)
       const useSDB = true // Boolean(process.env.USE_SYSTEM_DYNAMICS_TS)
-      if (useSDB) {
-        try {
-          const cld = await generateCausalRelationships(
-            transcript,
-            0.85,
-            true,
-            process.env.SDB_LLM_MODEL,
-            process.env.SDB_EMBEDDING_MODEL
-          )
-          if (cld.nodes.length === 0 || cld.relationships.length === 0) {
-            throw new Error('Failed to extract any nodes or relationships')
-          }
-          nodes = cld.nodes
-          relationships = cld.relationships
-        } catch (err) {
-          console.warn(
-            'System-Dynamics-Bot failed; falling back to LLM-based extraction:',
-            (err as any)?.message || err
-          )
-          nodes = await generateNodes(transcript)
-          relationships = await generateRelationships(transcript, nodes)
-        }
-      } else {
-        nodes = await generateNodes(transcript)
-        relationships = await generateRelationships(transcript, nodes)
+      // if (useSDB) {
+      // try {
+      const cld = await generateCausalRelationships(
+        transcript,
+        0.85,
+        true,
+        process.env.SDB_LLM_MODEL,
+        process.env.SDB_EMBEDDING_MODEL
+      )
+      if (cld.nodes.length === 0 || cld.relationships.length === 0) {
+        throw new Error('Failed to extract any nodes or relationships')
       }
+      nodes = cld.nodes
+      relationships = cld.relationships
+      statements = cld.statements
+      // } catch (err) {
+      //   console.warn(
+      //     'System-Dynamics-Bot failed; falling back to LLM-based extraction:',
+      //     (err as any)?.message || err
+      //   )
+      //   nodes = await generateNodes(transcript)
+      //   relationships = await generateRelationships(transcript, nodes)
+      // }
+      // } else {
+      //   nodes = await generateNodes(transcript)
+      //   relationships = await generateRelationships(transcript, nodes)
+      // }
     }
   } else {
-    const useSDB = true //Boolean(process.env.USE_SYSTEM_DYNAMICS_TS)
-    if (useSDB) {
-      try {
-        const cld = await generateCausalRelationships(
-          transcript,
-          0.85,
-          true,
-          process.env.SDB_LLM_MODEL,
-          process.env.SDB_EMBEDDING_MODEL
-        )
-        if (cld.nodes.length === 0 || cld.relationships.length === 0) {
-          throw new Error('Failed to extract any nodes or relationships')
-        }
-        nodes = cld.nodes
-        relationships = cld.relationships
-      } catch (err) {
-        console.warn('System-Dynamics-Bot failed; falling back to LLM-based extraction:', (err as any)?.message || err)
-        nodes = await generateNodes(transcript)
-        relationships = await generateRelationships(transcript, nodes)
-      }
-    } else {
-      nodes = await generateNodes(transcript)
-      relationships = await generateRelationships(transcript, nodes)
+    // const useSDB = true //Boolean(process.env.USE_SYSTEM_DYNAMICS_TS)
+    // if (useSDB) {
+    //   try {
+    const cld = await generateCausalRelationships(
+      transcript,
+      0.85,
+      true,
+      process.env.SDB_LLM_MODEL,
+      process.env.SDB_EMBEDDING_MODEL
+    )
+    if (cld.nodes.length === 0 || cld.relationships.length === 0) {
+      throw new Error('Failed to extract any nodes or relationships')
     }
+    nodes = cld.nodes
+    relationships = cld.relationships
+    statements = cld.statements
+    //   } catch (err) {
+    //     console.warn('System-Dynamics-Bot failed; falling back to LLM-based extraction:', (err as any)?.message || err)
+    //     nodes = await generateNodes(transcript)
+    //     relationships = await generateRelationships(transcript, nodes)
+    //   }
+    // } else {
+    //   nodes = await generateNodes(transcript)
+    //   relationships = await generateRelationships(transcript, nodes)
+    // }
   }
 
   // Filter out any nodes that don't appear in relationships (no subject/object links)
@@ -426,6 +431,7 @@ export default async function audioToDiagram(audioURL: string) {
   const mddPath = path.join(TMP_DIR, `${baseName}.mdd`)
   const svgPath = path.join(TMP_DIR, `${baseName}.svg`)
   const pngPath = path.join(TMP_DIR, `${baseName}.png`)
+  const dotPath = path.join(TMP_DIR, `${baseName}.dot`)
 
   // Create processing marker (write timestamp)
   try {
@@ -447,19 +453,38 @@ export default async function audioToDiagram(audioURL: string) {
     console.warn('Failed to export RDF for', baseName, e?.message ?? e)
   }
 
-  // Export Mermaid if missing
-  try {
-    const needMDD = !(await existsNonEmpty(mddPath))
-    const needSVG = !(await existsNonEmpty(svgPath))
-    const needPNG = !(await existsNonEmpty(pngPath))
-    if (needMDD || needSVG || needPNG) {
-      info('Writing mermaid .mdd, .svg and .png for', baseName)
-      await exportMermaid(TMP_DIR, baseName, nodes, relationships)
-    } else {
-      debug('.mdd already exists for', baseName)
+  const graphType = process.env.DIAGRAM_EXPORTER || 'mermaid' // options: 'mermaid' or 'graphviz'
+  console.log(graphType)
+
+  if (graphType === 'mermaid') {
+    // Export Mermaid if missing
+    try {
+      const needMDD = !(await existsNonEmpty(mddPath))
+      const needSVG = !(await existsNonEmpty(svgPath))
+      const needPNG = !(await existsNonEmpty(pngPath))
+      if (needMDD || needSVG || needPNG) {
+        info('Writing mermaid .mdd, .svg and .png for', baseName)
+        await exportMermaid(TMP_DIR, baseName, nodes, relationships)
+      } else {
+        debug('.mdd already exists for', baseName)
+      }
+    } catch (e: any) {
+      console.warn('Failed to export mermaid for', baseName, e?.message ?? e)
     }
-  } catch (e: any) {
-    console.warn('Failed to export mermaid for', baseName, e?.message ?? e)
+  } else if (graphType === 'graphviz') {
+    try {
+      const needDOT = !(await existsNonEmpty(dotPath))
+      const needSVG = !(await existsNonEmpty(svgPath))
+      const needPNG = !(await existsNonEmpty(pngPath))
+      if (needDOT || needSVG || needPNG) {
+        info('Writing graphviz .svg for', baseName)
+        await exportGraphViz(TMP_DIR, baseName, statements)
+      } else {
+        debug('.svg already exists for', baseName)
+      }
+    } catch (e: any) {
+      console.warn('Failed to export graphviz for', baseName, e?.message ?? e)
+    }
   }
 
   // Remove processing marker

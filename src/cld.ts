@@ -292,7 +292,7 @@ async function checkCausalRelationships(
   } else if (steps.includes('3') || steps.includes('4')) {
     return `${var1} -->(-) ${var2}`
   } else {
-    throw new Error('Unexpected answer while verifying causal relationship')
+    throw new Error('Unexpected answer while verifying causal relationship' + JSON.stringify(parsed))
   }
 }
 
@@ -427,6 +427,22 @@ export function extractVariables(relationship: string) {
   return [var1, var2, symbol]
 }
 
+export const RED = '\u001b[31m'
+export const RESET = '\u001b[0m'
+
+export function cosineSimilarity(a: number[], b: number[]) {
+  const dot = a.reduce((s, v, i) => s + v * (b[i] ?? 0), 0)
+  const magA = Math.sqrt(a.reduce((s, v) => s + v * v, 0))
+  const magB = Math.sqrt(b.reduce((s, v) => s + v * v, 0))
+  if (magA === 0 || magB === 0) throw new Error('Zero magnitude vector')
+  return dot / (magA * magB)
+}
+
+export function extractNumbers(input: string) {
+  const m = input.match(/\d+/g)
+  return m || []
+}
+
 function generateXmile(resultList: string[]) {
   let variablesDict: Record<string, string[]> = {}
   let connectors = ''
@@ -451,34 +467,6 @@ function generateXmile(resultList: string[]) {
 
   const xmile = `<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<xmile version=\"1.0\">\n\t<model>\n\t\t<variables>\n${xmileVariables}\t\t</variables>\n\t\t<views>\n\t\t\t${connectors}\t\t</views>\n\t</model>\n</xmile>`
   return xmile
-}
-
-function generateDot(resultList: string[]) {
-  let dot = 'digraph G {\n  rankdir=LR;\n  node [shape=box];\n'
-  for (const line of resultList) {
-    const [v1, v2, symbol] = extractVariables(line)
-    if (!v1 || !v2 || v1 === v2) continue
-    const label = symbol || ''
-    dot += `  \"${v1}\" -> \"${v2}\" [label=\"${label}\"];\n`
-  }
-  dot += '}\n'
-  return dot
-}
-
-export const RED = '\u001b[31m'
-export const RESET = '\u001b[0m'
-
-export function cosineSimilarity(a: number[], b: number[]) {
-  const dot = a.reduce((s, v, i) => s + v * (b[i] ?? 0), 0)
-  const magA = Math.sqrt(a.reduce((s, v) => s + v * v, 0))
-  const magB = Math.sqrt(b.reduce((s, v) => s + v * v, 0))
-  if (magA === 0 || magB === 0) throw new Error('Zero magnitude vector')
-  return dot / (magA * magB)
-}
-
-export function extractNumbers(input: string) {
-  const m = input.match(/\d+/g)
-  return m || []
 }
 
 export function xmileName(displayName: string) {

@@ -92,7 +92,13 @@ export function parseTTL(content: string) {
     }
   }
 
-  return { nodes, relationships }
+  const statements: string[] = []
+  for (const rel of relationships) {
+    const symbol = rel.predicate.includes('increases') ? '(+)' : rel.predicate.includes('decreases') ? '(-)' : ''
+    statements.push(`${rel.subject} --> ${rel.object} ${symbol}`.trim())
+  }
+
+  return { nodes, relationships, statements }
 }
 
 export default exportRDF

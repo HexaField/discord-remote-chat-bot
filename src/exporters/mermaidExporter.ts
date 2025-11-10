@@ -2,6 +2,7 @@ import { renderAsync } from '@resvg/resvg-js'
 import childProcess from 'node:child_process'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
+import { atomicWrite } from '../utils'
 
 function sanitizeId(s: string) {
   return s.replace(/[^a-zA-Z0-9_]+/g, '_').replace(/^_+|_+$/g, '') || 'N'
@@ -64,18 +65,6 @@ function runMermaidCLI(inputPath: string, outputPath: string, args = '') {
   })
 }
 
-async function atomicWrite(filePath: string, data: string | Buffer) {
-  const dir = path.dirname(filePath)
-  const base = path.basename(filePath)
-  const tmp = path.join(dir, `.${base}.partial`)
-  // If data is a Buffer, don't pass an encoding (write raw bytes).
-  if (Buffer.isBuffer(data)) {
-    await fsp.writeFile(tmp, data)
-  } else {
-    await fsp.writeFile(tmp, data, 'utf8')
-  }
-  await fsp.rename(tmp, filePath)
-}
 /**
  * Builds a Mermaid diagram definition from the given nodes and relationships.
  * @param nodes The nodes to include in the diagram.
