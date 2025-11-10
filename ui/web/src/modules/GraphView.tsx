@@ -17,6 +17,12 @@ export default function GraphView(props: {
   // optional callback when user hovers a node: { id, provenance, x, y }
   onNodeHover?: (arg: { id: string; provenance?: any[] | null; x: number; y: number }) => void
   onNodeOut?: () => void
+  // optional callback when user clicks a node or the background.
+  // If a node is clicked, arg.id is the node id and arg.provenance may be present.
+  // If the background is clicked, arg.id will be null.
+  onNodeClick?: (arg: { id: string | null; provenance?: any[] | null; x?: number; y?: number }) => void
+  // id of a node that should be treated as selected/focused in the view
+  selectedNodeId?: string | null
 }): JSX.Element {
   let container!: HTMLDivElement
   let svg!: SVGSVGElement
@@ -39,6 +45,7 @@ export default function GraphView(props: {
       const extra = Math.min(28, Math.max(0, Math.floor(label.length * 0.45)))
       return { ...n, r: base + extra }
     })
+
     const links: LinkDatum[] = props.data.links.map((l) => ({ ...l }))
 
     const selection = d3.select(svg)
@@ -176,6 +183,10 @@ export default function GraphView(props: {
       )
       .alphaDecay(0.05)
 
+    // NOTE: we'll render arrowheads as separate path elements (one per link)
+    // instead of using SVG markers. This avoids cross-browser/ID issues and
+    // lets us position the tip exactly on the target node border.
+
     const link = zoomG
       .append('g')
       .attr('stroke', '#999')
@@ -184,6 +195,9 @@ export default function GraphView(props: {
       .enter()
       .append('line')
       .attr('stroke-opacity', 0.6)
+      
+
+    // (arrow shapes are created after node label measurement so we have rect sizes)
 
     // link labels (predicate info) as + or -
     const linkLabel = zoomG
@@ -196,7 +210,6 @@ export default function GraphView(props: {
       .attr('class', 'link-label')
       .attr('font-size', 10)
       .attr('text-anchor', 'middle')
-      .attr('fill', '#333')
       .attr('pointer-events', 'none')
       .text((d) => {
         const lbl = (d.label || '').toString()
@@ -267,6 +280,26 @@ export default function GraphView(props: {
       } catch (e) {}
     })
 
+    // handle click on a node: stop propagation so svg/background click won't also fire
+    nodeG.on('click', function (event, d) {
+      try {
+        event.stopPropagation()
+      } catch (e) {}
+      try {
+        // debug: log node clicks so we can verify handler wiring
+        try {
+          // eslint-disable-next-line no-console
+          console.debug('GraphView node click', d.id)
+        } catch (e) {}
+        props.onNodeClick?.({
+          id: d.id,
+          provenance: (d as any).provenance ?? null,
+          x: (event as any).clientX,
+          y: (event as any).clientY
+        })
+      } catch (e) {}
+    })
+
     const label = nodeG
       .append('text')
       .text((d: any) => d.label ?? d.id)
@@ -301,12 +334,91 @@ export default function GraphView(props: {
       }
     })
 
+    // create arrow shapes after node sizes are measured so we can place the
+    // arrow tips exactly at the target rectangle boundary and keep arrows on top
+    const arrow = zoomG
+      .append('g')
+      .attr('class', 'link-arrows')
+      .selectAll('path')
+      .data(links)
+      .enter()
+      .append('path')
+      .attr('class', 'link-arrow')
+      .attr('d', 'M0,0 L-9,6 L-6,0 L-9,-6 Z')
+      .attr('fill', '#999')
+      .attr('pointer-events', 'none')
+
     sim.on('tick', () => {
       link
-        .attr('x1', (d) => (typeof d.source === 'string' ? 0 : d.source.x) as number)
-        .attr('y1', (d) => (typeof d.source === 'string' ? 0 : d.source.y) as number)
-        .attr('x2', (d) => (typeof d.target === 'string' ? 0 : d.target.x) as number)
-        .attr('y2', (d) => (typeof d.target === 'string' ? 0 : d.target.y) as number)
+        .attr('x1', (d: any) => (typeof d.source === 'string' ? 0 : d.source.x) as number)
+        .attr('y1', (d: any) => (typeof d.source === 'string' ? 0 : d.source.y) as number)
+        .attr('x2', (d: any) => {
+          const sx = typeof d.source === 'string' ? 0 : d.source.x
+          const sy = typeof d.source === 'string' ? 0 : d.source.y
+          const tx = typeof d.target === 'string' ? 0 : d.target.x
+          const ty = typeof d.target === 'string' ? 0 : d.target.y
+          if (!Number.isFinite(sx) || !Number.isFinite(sy) || !Number.isFinite(tx) || !Number.isFinite(ty)) return tx
+          const target = typeof d.target === 'string' ? null : d.target
+          const w = (target && (target.__rectW ?? (target.r ? target.r * 2 : 16))) || 16
+          const h = (target && (target.__rectH ?? (target.r ? target.r * 2 : 16))) || 16
+          const hw = w / 2
+          const hh = h / 2
+          const ux = sx - tx
+          const uy = sy - ty
+          const absUx = Math.abs(ux)
+          const absUy = Math.abs(uy)
+          if (absUx === 0 && absUy === 0) return tx
+          const k = Math.max(absUx / (hw || 1), absUy / (hh || 1))
+          const scale = k === 0 ? 0 : 1 / k
+          const ix = tx + ux * scale
+          return ix
+        })
+        .attr('y2', (d: any) => {
+          const sx = typeof d.source === 'string' ? 0 : d.source.x
+          const sy = typeof d.source === 'string' ? 0 : d.source.y
+          const tx = typeof d.target === 'string' ? 0 : d.target.x
+          const ty = typeof d.target === 'string' ? 0 : d.target.y
+          if (!Number.isFinite(sx) || !Number.isFinite(sy) || !Number.isFinite(tx) || !Number.isFinite(ty)) return ty
+          const target = typeof d.target === 'string' ? null : d.target
+          const w = (target && (target.__rectW ?? (target.r ? target.r * 2 : 16))) || 16
+          const h = (target && (target.__rectH ?? (target.r ? target.r * 2 : 16))) || 16
+          const hw = w / 2
+          const hh = h / 2
+          const ux = sx - tx
+          const uy = sy - ty
+          const absUx = Math.abs(ux)
+          const absUy = Math.abs(uy)
+          if (absUx === 0 && absUy === 0) return ty
+          const k = Math.max(absUx / (hw || 1), absUy / (hh || 1))
+          const scale = k === 0 ? 0 : 1 / k
+          const iy = ty + uy * scale
+          return iy
+        })
+
+      // position per-link arrowheads so the tip sits on the target rectangle edge
+      arrow.attr('transform', (d: any) => {
+        const sx = typeof d.source === 'string' ? 0 : d.source.x
+        const sy = typeof d.source === 'string' ? 0 : d.source.y
+        const tx = typeof d.target === 'string' ? 0 : d.target.x
+        const ty = typeof d.target === 'string' ? 0 : d.target.y
+        if (!Number.isFinite(sx) || !Number.isFinite(sy) || !Number.isFinite(tx) || !Number.isFinite(ty)) return ''
+        const target = typeof d.target === 'string' ? null : d.target
+        const w = (target && (target.__rectW ?? (target.r ? target.r * 2 : 16))) || 16
+        const h = (target && (target.__rectH ?? (target.r ? target.r * 2 : 16))) || 16
+        const hw = w / 2
+        const hh = h / 2
+        const ux = sx - tx
+        const uy = sy - ty
+        const absUx = Math.abs(ux)
+        const absUy = Math.abs(uy)
+        if (absUx === 0 && absUy === 0) return ''
+        const k = Math.max(absUx / (hw || 1), absUy / (hh || 1))
+        const scale = k === 0 ? 0 : 1 / k
+        const ix = tx + ux * scale
+        const iy = ty + uy * scale
+        const angle = (Math.atan2(ty - sy, tx - sx) * 180) / Math.PI
+        return `translate(${ix},${iy}) rotate(${angle})`
+      })
 
       // position link labels at link midpoints
       linkLabel
@@ -323,6 +435,21 @@ export default function GraphView(props: {
       // position node groups by translating the group to node x/y
       nodeG.attr('transform', (d: any) => `translate(${d.x},${d.y})`)
     })
+
+    // background click clears selection
+    selection.on('click', (event) => {
+      try {
+        // if click target is the svg itself or the root group (not a node-group), treat as background
+        const tgt = event.target as Element
+        if (!tgt.closest || !tgt.closest('.node-group')) {
+          try {
+            // eslint-disable-next-line no-console
+            console.debug('GraphView background click')
+          } catch (e) {}
+          props.onNodeClick?.({ id: null })
+        }
+      } catch (e) {}
+    })
   }
 
   // react to highlight changes without rebuilding the simulation
@@ -330,27 +457,42 @@ export default function GraphView(props: {
     // access prop to track changes
     const h = props.highlightedNodes
     if (!svgSel) return
-    // update node/link opacity based on highlightedNodes
-    const selNodes = svgSel.selectAll('circle')
+    // update node/link opacity based on highlightedNodes (include selectedNodeId so selection persists)
+    const selRect = svgSel.selectAll('g.node-group').selectAll('rect')
     const selLinks = svgSel.selectAll('line')
     const selLinkLabels = svgSel.selectAll('text.link-label')
-    if (h && h.size) {
-      selNodes.attr('opacity', (d: any) => (h.has(d.id) ? 1 : 0.12))
+    const selId = props.selectedNodeId ?? null
+    const active = new Set<string>()
+    if (h && h.size) for (const v of Array.from(h)) active.add(v)
+    if (selId) active.add(selId)
+    if (active.size) {
+      selRect.attr('opacity', (d: any) => (active.has(d.id) ? 1 : 0.12))
       selLinks.attr('opacity', (d: any) => {
-        // if either end is highlighted, keep link visible
         const s = typeof d.source === 'string' ? d.source : d.source.id
         const t = typeof d.target === 'string' ? d.target : d.target.id
-        return h.has(s) || h.has(t) ? 0.9 : 0.08
+        return active.has(s) || active.has(t) ? 0.9 : 0.08
       })
       selLinkLabels.attr('opacity', (d: any) => {
         const s = typeof d.source === 'string' ? d.source : d.source.id
         const t = typeof d.target === 'string' ? d.target : d.target.id
-        return h.has(s) || h.has(t) ? 1 : 0.12
+        return active.has(s) || active.has(t) ? 1 : 0.12
       })
     } else {
-      selNodes.attr('opacity', 1)
+      selRect.attr('opacity', 1)
       selLinks.attr('opacity', 0.6)
       selLinkLabels.attr('opacity', 1)
+    }
+
+    // apply selection styling (stroke) and bring selected node to front
+    const nodeGroups = svgSel.selectAll('g.node-group')
+    nodeGroups
+      .select('rect')
+      .attr('stroke', (d: any) => (selId && d.id === selId ? '#222' : null))
+      .attr('stroke-width', (d: any) => (selId && d.id === selId ? 1.5 : null))
+    if (selId) {
+      try {
+        nodeGroups.filter((d: any) => d.id === selId).raise()
+      } catch (e) {}
     }
   })
 

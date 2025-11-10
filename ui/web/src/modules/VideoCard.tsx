@@ -19,6 +19,7 @@ export default function VideoCard(props: { id: string }): JSX.Element {
   const [graph, setGraph] = createSignal<GraphData | null>(null)
   const [highlightedNodes, setHighlightedNodes] = createSignal<Set<string> | null>(null)
   const [hoveredTranscriptIdxs, setHoveredTranscriptIdxs] = createSignal<Set<number> | null>(null)
+  const [selectedNodeId, setSelectedNodeId] = createSignal<string | null>(null)
   const [tooltip, setTooltip] = createSignal<{
     visible: boolean
     x?: number
@@ -27,6 +28,7 @@ export default function VideoCard(props: { id: string }): JSX.Element {
   }>({ visible: false })
   const [leftWidth, setLeftWidth] = createSignal<number | null>(null) // pixels or null (use flex)
   let leftEl: HTMLDivElement | undefined
+  let transcriptEl: HTMLDivElement | undefined
 
   onMount(() => {
     // Initialize left width: prefer saved value in localStorage, otherwise default to 2/3 of available width.
@@ -143,6 +145,18 @@ export default function VideoCard(props: { id: string }): JSX.Element {
     return out
   }
 
+  // format seconds (number) into H:MM:SS or M:SS
+  function formatTime(s: number | undefined): string {
+    if (s === undefined || s === null || Number.isNaN(s)) return ''
+    const total = Math.max(0, Math.floor(s))
+    const hrs = Math.floor(total / 3600)
+    const mins = Math.floor((total % 3600) / 60)
+    const secs = total % 60
+    const pad = (n: number) => String(n).padStart(2, '0')
+    if (hrs > 0) return `${hrs}:${pad(mins)}:${pad(secs)}`
+    return `${mins}:${pad(secs)}`
+  }
+
   // handle node hover from GraphView
   function handleNodeHover(ev: { id: string; provenance?: any[] | null; x: number; y: number }) {
     // highlight this node
@@ -172,6 +186,45 @@ export default function VideoCard(props: { id: string }): JSX.Element {
     setTooltip({ visible: false })
   }
 
+  // handle node click: toggle selection and scroll the transcript to the first related chunk
+  function handleNodeClick(ev: { id: string | null; provenance?: any[] | null; x?: number; y?: number } | null) {
+    if (!ev || ev.id === null) {
+      // background click -> clear selection
+      setHighlightedNodes(null)
+      setHoveredTranscriptIdxs(null)
+      setTooltip({ visible: false })
+      setSelectedNodeId(null)
+      return
+    }
+    const id = ev.id
+    const cur = highlightedNodes()
+    // toggle if same selected
+    if (selectedNodeId() === id) {
+      setSelectedNodeId(null)
+      setHighlightedNodes(null)
+      setHoveredTranscriptIdxs(null)
+      setTooltip({ visible: false })
+      return
+    }
+    // select this node
+    setSelectedNodeId(id)
+    setHighlightedNodes(new Set([id]))
+    // resolve provenance from nodeById map if available
+    const nb = nodeById().get(id)
+    const prov = nb ? (nb.provenance as any[] | undefined) : ev.provenance
+    const idxs = provToChunkIndices(prov)
+    setHoveredTranscriptIdxs(idxs.size ? idxs : null)
+
+    // scroll to the first matching transcript chunk if present
+    if (idxs.size && transcriptEl) {
+      const first = Array.from(idxs).sort((a, b) => a - b)[0]
+      try {
+        const target = transcriptEl.querySelector(`[data-idx="${first}"]`) as HTMLElement | null
+        if (target) target.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      } catch (e) {}
+    }
+  }
+
   return (
     <div class="space-y-4 h-full">
       {/* two-column resizable: graph left, transcript+video right */}
@@ -187,6 +240,8 @@ export default function VideoCard(props: { id: string }): JSX.Element {
               highlightedNodes={highlightedNodes()}
               onNodeHover={handleNodeHover}
               onNodeOut={handleNodeOut}
+              onNodeClick={handleNodeClick}
+              selectedNodeId={selectedNodeId()}
             />
           </div>
         </div>
@@ -200,14 +255,23 @@ export default function VideoCard(props: { id: string }): JSX.Element {
 
         <div class="flex-1 min-w-0">
           <h2 class="font-semibold mb-2">Transcript</h2>
-          <div class="max-h-[240px] overflow-y-auto space-y-1 text-sm p-2 bg-white rounded border relative">
+          <div
+            ref={(el) => (transcriptEl = el)}
+            class="max-h-[240px] overflow-y-auto space-y-1 text-sm p-2 bg-white rounded border relative"
+          >
             <For each={transcript()}>
               {(chunk, i) => {
                 const idx = i()
                 const isHighlighted = () => (hoveredTranscriptIdxs() ? hoveredTranscriptIdxs()!.has(idx) : false)
                 return (
                   <div
-                    class={'p-1 rounded cursor-default ' + (isHighlighted() ? 'bg-yellow-50' : 'hover:bg-gray-50')}
+                    data-idx={idx}
+                    // make a group so child timestamp can respond to hover/focus
+                    class={
+                      'group p-1 rounded cursor-default focus:outline-none ' +
+                      (isHighlighted() ? 'bg-yellow-50' : 'hover:bg-gray-50')
+                    }
+                    tabindex={0}
                     onMouseEnter={() => {
                       // compute nodes that reference this transcript chunk
                       const nodes = nodesForTranscriptIndex(idx)
@@ -218,7 +282,20 @@ export default function VideoCard(props: { id: string }): JSX.Element {
                       setHighlightedNodes(null)
                       setHoveredTranscriptIdxs(null)
                     }}
+                    onFocus={() => {
+                      const nodes = nodesForTranscriptIndex(idx)
+                      setHighlightedNodes(nodes.size ? nodes : null)
+                      setHoveredTranscriptIdxs(nodes.size ? new Set([idx]) : new Set([idx]))
+                    }}
+                    onBlur={() => {
+                      setHighlightedNodes(null)
+                      setHoveredTranscriptIdxs(null)
+                    }}
                   >
+                    {/* timestamp at start, gray by default, stronger on hover/focus */}
+                    <time class="text-[12px] text-gray-400 mr-2 group-hover:text-gray-700 group-focus:text-gray-700 transition-colors">
+                      {formatTime(chunk.start)}
+                    </time>
                     <span>{chunk.text}</span>
                   </div>
                 )

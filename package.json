@@ -7,7 +7,7 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "format": "prettier --write .",
-    "dev": "NODE_ENV=development ts-node-dev --respawn --transpile-only src/index.ts",
+    "dev": "NODE_ENV=development ts-node-dev --respawn --transpile-only src/index.ts --watch src",
     "lint": "eslint . --ext .ts",
     "test": "vitest run",
     "ui:server": "ts-node-dev --respawn --transpile-only ui/server/index.ts",

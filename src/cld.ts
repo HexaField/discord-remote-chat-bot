@@ -50,11 +50,7 @@ You will conduct a multistep process:
    - reasoning: brief explanation (string)
    - relevant text: the exact text span that supports the relationship (string)
 
-   Definitions:
-   - positive: increasing subject increases object AND decreasing subject decreases object
-   - negative: increasing subject decreases object AND decreasing subject increases object
-
-3. Not all variables must have relationships.
+3. Not all variables must have relationships. Only output relationships that are clearly supported by the text and is relevant to the main topic.
 
 4. If there are no causal relationships in the provided text, return empty JSON {}.
 
@@ -105,7 +101,7 @@ export async function generateCausalRelationships(
     // to the topic. The classifier is constrained to answer only 'yes' or 'no'.
     if (topicSummary) {
       try {
-        const clsSystem = `You are a classification assistant. Here is a short topic summary:\n${topicSummary}\n\nFor the given sentence, answer ONLY 'yes' or 'no' (lowercase) indicating whether the sentence is relevant to the topic summary.`
+        const clsSystem = `You are a classification assistant. Here is a short topic summary:\n${topicSummary}\n\nFor the given sentence, answer ONLY 'yes' or 'no' (lowercase) indicating whether the sentence is relevant to the topic summary, and contains any causal relationships that should be extracted to be part of a causal loop diagram.`
         const clsResp = await callLLM(clsSystem, sec, 'ollama', 'llama3.1:8b')
         if (clsResp && clsResp.success && clsResp.data) {
           const ans = String(clsResp.data).trim().toLowerCase()
