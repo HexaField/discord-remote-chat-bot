@@ -175,7 +175,15 @@ ${table}`
     }
 
     try {
-      const { kumuPath, pngPath } = await audioToDiagram(url)
+      const onProgress = async (message: string) => {
+        try {
+          await chat.editReply({ content: `🔄 ${message}` })
+        } catch (e) {
+          console.warn('onProgress editReply failed', e)
+        }
+      }
+
+      const { kumuPath, pngPath } = await audioToDiagram(url, onProgress)
       const diagramData = await fs.readFile(kumuPath, 'utf-8')
       const pngData = await fs.readFile(pngPath)
       return chat.editReply({

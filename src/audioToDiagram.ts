@@ -291,10 +291,20 @@ export async function downloadYoutubeAudio(youtubeURL: string, destPath: string,
   })
 }
 
-export default async function audioToDiagram(audioURL: string) {
+export default async function audioToDiagram(audioURL: string, onProgress?: (message: string) => void | Promise<void>) {
   await fsp.mkdir(TMP_DIR, { recursive: true })
 
   // Ensure tools
+  const notify = async (msg: string) => {
+    if (!onProgress) return
+    try {
+      await Promise.resolve(onProgress(msg))
+    } catch (e) {
+      debug('onProgress callback failed', e)
+    }
+  }
+
+  await notify('Preparing dependencies (ffmpeg, whisper)…')
   await ensureFfmpegAvailable()
   await ensureWhisperAvailable()
 
@@ -318,6 +328,7 @@ export default async function audioToDiagram(audioURL: string) {
   const graphJSONPath = path.join(sourceDir, `graph.json`)
 
   // Download
+  await notify('Downloading audio…')
   if (audioURL.includes('youtube.com') || audioURL.includes('youtu.be')) {
     await downloadYoutubeAudio(audioURL, audioPath, audioFormat)
   } else {
@@ -340,6 +351,7 @@ export default async function audioToDiagram(audioURL: string) {
     debug('Using existing transcript at', transcriptPath)
     transcript = await fsp.readFile(transcriptPath, 'utf8')
   } else {
+    await notify('Transcribing audio to text…')
     transcript = await transcribeAudioFile(audioPath, transcriptPath)
   }
 
@@ -351,6 +363,7 @@ export default async function audioToDiagram(audioURL: string) {
   let loadedFromGraph = false
   if (await existsNonEmpty(graphJSONPath)) {
     try {
+      await notify('Loading existing graph data…')
       const parsed = await loadGraphJSON(sourceDir)
       nodes = parsed.nodes
       relationships = parsed.relationships
@@ -366,6 +379,7 @@ export default async function audioToDiagram(audioURL: string) {
     let generatedFromSDB = false
     if (useSDB) {
       try {
+        await notify('Extracting causal relationships (System Dynamics Bot)…')
         const cld = await generateCausalRelationships(
           transcript,
           0.85,
@@ -385,13 +399,16 @@ export default async function audioToDiagram(audioURL: string) {
       }
     }
     if (!generatedFromSDB) {
+      await notify('Extracting concepts (nodes)…')
       nodes = await generateNodes(transcript)
+      await notify('Extracting relationships between concepts…')
       relationships = await generateRelationships(transcript, nodes)
     }
   }
 
   // Filter out any nodes that don't appear in relationships (no subject/object links)
   try {
+    await notify('Filtering disconnected concepts…')
     const relNodeSet = new Set<string>()
     for (const r of relationships) {
       if (r.subject) relNodeSet.add(r.subject)
@@ -437,6 +454,7 @@ export default async function audioToDiagram(audioURL: string) {
     const needGraph = !(await existsNonEmpty(graphJSONPath))
     if (needGraph) {
       info('Writing graph JSON for', baseName)
+      await notify('Writing graph data…')
       await exportGraphJSON(sourceDir, nodes, relationships, statements)
     } else {
       debug('Graph JSON already exists for', baseName)
@@ -456,6 +474,7 @@ export default async function audioToDiagram(audioURL: string) {
       const needPNG = !(await existsNonEmpty(mermaidPNG))
       if (needMDD || needSVG || needPNG) {
         info('Writing mermaid artifacts for', baseName)
+        await notify('Rendering diagram (Mermaid)…')
         await exportMermaid(sourceDir, 'mermaid', nodes, relationships)
       } else {
         debug('Mermaid artifacts already exist for', baseName)
@@ -470,6 +489,7 @@ export default async function audioToDiagram(audioURL: string) {
       const needPNG = !(await existsNonEmpty(graphvizPNG))
       if (needDOT || needSVG || needPNG) {
         info('Writing graphviz artifacts for', baseName)
+        await notify('Rendering diagram (Graphviz)…')
         await exportGraphViz(sourceDir, 'graphviz', statements)
       } else {
         debug('Graphviz artifacts already exist for', baseName)
@@ -488,6 +508,8 @@ export default async function audioToDiagram(audioURL: string) {
 
   const activePNG = graphType === 'graphviz' ? graphvizPNG : mermaidPNG
   const activeSVG = graphType === 'graphviz' ? graphvizSVG : mermaidSVG
+
+  await notify('Finalizing…')
 
   return {
     dir: sourceDir,
