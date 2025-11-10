@@ -1,7 +1,7 @@
 import { createEffect, createSignal, For, onCleanup, onMount, Show } from 'solid-js'
 import VideoCard from './VideoCard'
 
-export type VideoItem = { id: string; title?: string }
+export type VideoItem = { id: string; title?: string; thumbnail?: string }
 
 export default function App() {
   const [videos, setVideos] = createSignal<VideoItem[]>([])
@@ -153,7 +153,13 @@ export default function App() {
                   class={`w-full text-left p-3 hover:bg-gray-50 flex items-center gap-2 ${selected() === v.id ? 'bg-gray-100' : ''}`}
                   onClick={() => setSelected((p) => (p === v.id ? null : v.id))}
                 >
-                  <div class="w-8 h-8 bg-gray-200 rounded flex items-center justify-center text-xs">YT</div>
+                  <div class="w-8 h-8 bg-gray-200 rounded overflow-hidden">
+                    {v.thumbnail ? (
+                      <img src={v.thumbnail} alt={v.title ?? v.id} class="w-8 h-8 object-cover" />
+                    ) : (
+                      <div class="w-8 h-8 flex items-center justify-center text-xs">YT</div>
+                    )}
+                  </div>
                   {/* hide text content when collapsed */}
                   {!collapsed() && (
                     <div class="truncate">

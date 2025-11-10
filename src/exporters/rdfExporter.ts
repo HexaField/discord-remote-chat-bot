@@ -22,12 +22,14 @@ export function buildStatements(relationships: Relationship[]) {
   return statements
 }
 
-export async function exportGraphJSON(dir: string, nodes: any[], relationships: Relationship[]) {
+export async function exportGraphJSON(dir: string, nodes: any[], relationships: Relationship[], metadata?: any) {
   await fsp.mkdir(dir, { recursive: true })
   const jsonPath = path.join(dir, `graph.json`)
   const data = {
     nodes,
-    relationships
+    relationships,
+    // optional metadata block: e.g. { name: '...', thumbnail: 'https://...' }
+    ...(metadata ? { metadata } : {})
   }
   await atomicWrite(jsonPath, JSON.stringify(data, null, 2))
   return { jsonPath }
@@ -49,11 +51,12 @@ export async function loadGraphJSON(dir: string) {
         }))
         .filter((r: Relationship) => r.subject && r.predicate && r.object)
     : []
+  const metadata: any = parsed?.metadata ?? null
   const statements: string[] =
     Array.isArray(parsed?.statements) && parsed.statements.length > 0
       ? parsed.statements.map(String)
       : buildStatements(relationships)
-  return { nodes, relationships, statements }
+  return { nodes, relationships, statements, metadata }
 }
 
 export default exportGraphJSON

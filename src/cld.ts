@@ -20,18 +20,30 @@ export type VerifiedRelationship = {
   relevant: string
   createdAt: string
   verifiedAt: string
-  provenance?: any
+  provenance?: ProvenanceEntry[]
 }
 
 export type NodeType = 'driver' | 'obstacle' | 'actor' | 'other'
-export type Node = { label: string; type?: NodeType; provenance?: any }
+export type Node = { label: string; type?: NodeType; provenance?: ProvenanceEntry[] }
 
-function simpleSentenceSplit(text: string): string[] {
-  // very simple sentence splitter
-  return text
-    .split(/(?<=[.!?])\s+/)
-    .map((s) => s.trim())
-    .filter(Boolean)
+// Standardized provenance entry for relationships/nodes. Properties are optional
+// but any provenance field will be shaped to this type (array of entries).
+export type ProvenanceEntry = {
+  // optional index referencing a transcript chunk
+  chunkIndex?: number
+  // alternative index property used in some outputs
+  index?: number
+  // optional time spans (seconds)
+  start?: number
+  end?: number
+  // optional snippet of supporting text
+  text?: string
+  // timestamp when verification/entry was created
+  verifiedAt?: string
+  // raw LLM payload or any other provider-specific debugging info
+  llmRaw?: any
+  // allow additional provider-specific fields
+  [k: string]: any
 }
 
 const systemPrompt = `You are a System Dynamics Professional Modeler.
@@ -57,14 +69,18 @@ You will conduct a multistep process:
 Only return the JSON as shown—no prose, no markdown.
 `
 
+const fastLLMModel = 'gemma3:1b'
+const mediumLLMModel = 'llama3.1:8b'
+
 export async function generateCausalRelationships(
   sentences: string[],
   onProgress: (msg: string) => void,
   threshold = 0.85,
   verbose = false,
-  llmModel = 'llama3.1:8b',
+  llmModel = mediumLLMModel,
   embeddingModel = 'bge-m3:latest'
 ) {
+  onProgress(`Generating Causal Relationships: Summarising ${sentences.length} sentences...`)
   // Generate a short topic summary: ask the LLM to produce a few short sentences about
   // the overall topic of the provided transcript. We join those sentences into a
   // single topic string which will be used to classify sentence relevance below.
@@ -72,7 +88,7 @@ export async function generateCausalRelationships(
   try {
     const topicSystem = `You are a helpful assistant. Given a transcript, generate 2-4 short sentences that describe the main topic(s) covered. Return only the sentences, each on its own line.`
     const joined = sentences.join('\n')
-    const topicResp = await callLLM(topicSystem, joined, 'ollama', 'llama3.1:8b')
+    const topicResp = await callLLM(topicSystem, joined, 'ollama', mediumLLMModel)
     if (topicResp && topicResp.success && topicResp.data) {
       // convert to string and split into sentences, then join into single-line summary
       const raw = String(topicResp.data)
@@ -102,7 +118,7 @@ export async function generateCausalRelationships(
     if (topicSummary) {
       try {
         const clsSystem = `You are a classification assistant. Here is a short topic summary:\n${topicSummary}\n\nFor the given sentence, answer ONLY 'yes' or 'no' (lowercase) indicating whether the sentence is relevant to the topic summary, and contains any causal relationships that should be extracted to be part of a causal loop diagram.`
-        const clsResp = await callLLM(clsSystem, sec, 'ollama', 'llama3.1:8b')
+        const clsResp = await callLLM(clsSystem, sec, 'ollama', fastLLMModel)
         if (clsResp && clsResp.success && clsResp.data) {
           const ans = String(clsResp.data).trim().toLowerCase()
           // Accept responses that start with yes/no
@@ -119,7 +135,7 @@ export async function generateCausalRelationships(
       }
     }
     // Step 1 (per section)
-    const resp1 = await callLLM(systemPrompt, sec, 'ollama', 'llama3.1:8b')
+    const resp1 = await callLLM(systemPrompt, sec, 'ollama', mediumLLMModel)
     if (!resp1.success || !resp1.data) {
       warn('LLM failed to produce initial response for a section')
       continue
@@ -214,12 +230,15 @@ export async function generateCausalRelationships(
     relevant: string
     createdAt: string
     verifiedAt: string
-    provenance?: any
+    provenance?: ProvenanceEntry[]
   }> = []
 
   for (let i = 0; i < checked.length; i++) {
     const vals = checked[i]
     const verified = await checkCausalRelationships(vals)
+    // Ensure provenance is always an array (checkCausalRelationships will populate)
+    if (verified.provenance && !Array.isArray(verified.provenance))
+      verified.provenance = [verified.provenance as ProvenanceEntry]
     verifiedEntries.push(verified)
   }
 
@@ -240,7 +259,15 @@ export async function generateCausalRelationships(
       if (e.createdAt < existing.createdAt) existing.createdAt = e.createdAt
       existing.reasoning = `${existing.reasoning}${existing.reasoning && e.reasoning ? ' | ' : ''}${e.reasoning}`
       existing.provenance = existing.provenance || []
-      existing.provenance.push(e.provenance || { verifiedAt: e.verifiedAt })
+      // append provenance entries from e to existing.provenance
+      if (Array.isArray(e.provenance)) {
+        existing.provenance.push(...e.provenance)
+      } else if (e.provenance) {
+        existing.provenance.push(e.provenance as ProvenanceEntry)
+      } else {
+        // fallback: record the verification timestamp
+        existing.provenance.push({ verifiedAt: e.verifiedAt })
+      }
     }
   }
 
@@ -253,7 +280,7 @@ export async function generateCausalRelationships(
     relevant: string
     createdAt: string
     verifiedAt: string
-    provenance?: any
+    provenance?: ProvenanceEntry[]
     subjectType?: NodeType
     objectType?: NodeType
   }>
@@ -268,7 +295,7 @@ export async function generateCausalRelationships(
   // a small local heuristic fallback. The classification is attached to each
   // relationship as subjectType/objectType so downstream exporters can style
   // nodes without requiring a breaking change to the nodes array shape.
-  async function classifyNodes(nodeList: string[], textContext: string, llmModelLocal = llmModel) {
+  async function classifyNodes(nodeList: string[], textContext: string, llmModelLocal = mediumLLMModel) {
     const out: { [k: string]: NodeType } = {}
     if (!nodeList || nodeList.length === 0) return out
 
@@ -279,7 +306,7 @@ export async function generateCausalRelationships(
 - actor: people, agents, or processes that operate in/through the system
 - other: none of the above
 
-Return ONLY a single JSON object mapping the variable name to one of the strings: driver, obstacle, actor, other. Example: {"work remaining":"other","fatigue":"obstacle"}`
+Return ONLY a single JSON object mapping the variable name to one of the strings: driver, obstacle, actor, other. Example: {"work remaining":"driver","fatigue":"obstacle"}`
 
     const promptBody = nodeList.join('\n') + '\n\nContext:\n' + (textContext || '')
     try {
@@ -357,7 +384,7 @@ async function checkCausalRelationships(entry: RelationshipEntry, llmModel = 'll
   const var2 = entry.object
   const prompt = `Relationship: ${var1} -> ${var2}\nRelevant Text: ${entry.relevant}\nReasoning: ${entry.reasoning}\n\nGiven the above text, select which of the following options are correct (there may be more than one):\n1. increasing ${var1} increases ${var2}\n2. decreasing ${var1} decreases ${var2}\n3. increasing ${var1} decreases ${var2}\n4. decreasing ${var1} increases ${var2}\n\nRespond in JSON with keys 'answers' (a list of numbers) and 'reasoning'.`
 
-  const resp = await callLLM(prompt, '', 'ollama', llmModel)
+  const resp = await callLLM(prompt, '', 'ollama', fastLLMModel)
   if (!resp.success || !resp.data) {
     throw new Error('LLM failed while checking causal relationship')
   }
@@ -400,7 +427,7 @@ async function checkCausalRelationships(entry: RelationshipEntry, llmModel = 'll
     relevant: entry.relevant,
     createdAt: entry.createdAt,
     verifiedAt: new Date().toISOString(),
-    provenance: { llmRaw: resp.data }
+    provenance: [{ llmRaw: resp.data, verifiedAt: new Date().toISOString() }]
   }
   return out
 }
@@ -472,7 +499,7 @@ async function checkVariables(
   const prompt = `You will receive a list of relationship objects and groups of similar variables to merge.\nRelationships:\n${JSON.stringify(
     entries
   )}\nSimilar Variables (pairs/groups to merge):\n${JSON.stringify(similar_variables)}\nPlease return a single JSON object mapping ordinal keys (\"1\", \"2\", ...) to entries with subject/predicate/object/reasoning/relevant text.`
-  const resp = await callLLM(mergeSystem, prompt, 'ollama', 'llama3.1:8b')
+  const resp = await callLLM(mergeSystem, prompt, 'ollama', mediumLLMModel)
   if (!resp.success || !resp.data) throw new Error('LLM failed while merging similar variables')
   const parsed = loadJson(resp.data)
   if (!parsed) throw new Error('Got no corrected response from the assistant')

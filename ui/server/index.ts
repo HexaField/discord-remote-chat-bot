@@ -26,15 +26,26 @@ function readItems(): VideoItem[] {
     const vttPath = path.join(DATA_ROOT, dir, 'audio.vtt')
     const graphPath = path.join(DATA_ROOT, dir, 'graph.json')
     let title: string | undefined
+    let thumbnail: string | undefined
     const metaPath = path.join(DATA_ROOT, dir, 'meta.json')
     if (fs.existsSync(metaPath)) {
       try {
         title = JSON.parse(fs.readFileSync(metaPath, 'utf-8')).title
       } catch {}
     }
+    // If no meta.json title, try graph.json metadata
+    if ((!title || title === undefined) && fs.existsSync(graphPath)) {
+      try {
+        const raw = JSON.parse(fs.readFileSync(graphPath, 'utf-8'))
+        if (!title && raw?.metadata?.title) title = raw.metadata.title
+        if (!title && raw?.metadata?.name) title = raw.metadata.name
+        if (raw?.metadata?.thumbnail) thumbnail = raw.metadata.thumbnail
+      } catch {}
+    }
     return {
       id: dir,
       title,
+      thumbnail,
       transcriptPath: fs.existsSync(transcriptPath) ? transcriptPath : undefined,
       vttPath: fs.existsSync(vttPath) ? vttPath : undefined,
       graphPath: fs.existsSync(graphPath) ? graphPath : undefined
@@ -43,7 +54,7 @@ function readItems(): VideoItem[] {
 }
 
 app.get('/api/videos', (_req: Request, res: Response) => {
-  const items = readItems().map((v) => ({ id: v.id, title: v.title }))
+  const items = readItems().map((v) => ({ id: v.id, title: v.title, thumbnail: (v as any).thumbnail }))
   res.json(items)
 })
 

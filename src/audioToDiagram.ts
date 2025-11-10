@@ -510,7 +510,23 @@ export default async function audioToDiagram(audioURL: string, onProgress?: (mes
     if (needGraph) {
       info('Writing graph JSON for', baseName)
       await notify('Writing graph data…')
-      await exportGraphJSON(sourceDir, nodes, relationships)
+      // Build metadata: include a simple name derived from the file/base name
+      const metadata: any = {
+        name: originalName || baseName,
+        source: audioURL,
+        created: Date.now()
+      }
+      // For YouTube URLs include a thumbnail link (use video id stored in urlPath)
+      if (audioURL.includes('youtube.com') || audioURL.includes('youtu.be')) {
+        try {
+          const videoId = urlPath
+          if (videoId) metadata.thumbnail = `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`
+        } catch (e) {
+          // ignore
+        }
+      }
+
+      await exportGraphJSON(sourceDir, nodes, relationships, metadata)
     } else {
       debug('Graph JSON already exists for', baseName)
     }
