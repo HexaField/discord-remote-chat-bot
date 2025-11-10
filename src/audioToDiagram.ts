@@ -6,7 +6,7 @@ import path from 'node:path'
 import { generateCausalRelationships } from './cld'
 import { exportGraphViz } from './exporters/graphVizExporter'
 import exportMermaid from './exporters/mermaidExporter'
-import { exportRDF, parseTTL } from './exporters/rdfExporter'
+import { exportGraphJSON, loadGraphJSON } from './exporters/rdfExporter'
 import { convertTo16kMonoWav, ensureFfmpegAvailable } from './ffmpeg'
 import { callLLM } from './llm'
 import { debug, info } from './logger'
@@ -62,6 +62,15 @@ export function toKumuJSON(nodes: string[], relationships: Relationship[]) {
   return { elements, connections }
 }
 
+function relationshipsToStatements(relationships: Relationship[]) {
+  const out: string[] = []
+  for (const rel of relationships) {
+    const symbol = rel.predicate.includes('increases') ? '(+)' : rel.predicate.includes('decreases') ? '(-)' : ''
+    out.push(`${rel.subject} --> ${rel.object} ${symbol}`.trim())
+  }
+  return out
+}
+
 async function downloadToFile(url: string, dest: string) {
   const res = await fetch(url)
   if (!res.ok) throw new Error(`Failed to download ${url}: ${res.status} ${res.statusText}`)
@@ -74,12 +83,13 @@ async function downloadToFile(url: string, dest: string) {
  * Accepts an audio file URL, returns the path to the generated Kumu JSON file.
  */
 export async function transcribeAudioFile(inputPath: string, transcriptPath: string, audioFormat = 'mp3') {
-  // Convert
-  const baseName = path.basename(inputPath, path.extname(inputPath))
-  const audioPath = path.join(TMP_DIR, `${baseName}.${audioFormat}`)
-  const outBase = path.join(TMP_DIR, baseName)
+  // Convert in-place to standardized audio filename under transcript directory
+  const dir = path.dirname(transcriptPath)
+  const audioPath =
+    path.extname(inputPath).toLowerCase() === `.${audioFormat}` ? inputPath : path.join(dir, `audio.${audioFormat}`)
+  const outBase = path.join(dir, 'transcript')
 
-  if (path.extname(inputPath).toLowerCase() !== `.${audioFormat}`) {
+  if (inputPath !== audioPath) {
     await convertTo16kMonoWav(inputPath, audioPath)
   }
 
@@ -300,12 +310,12 @@ export default async function audioToDiagram(audioURL: string) {
   const originalName = path.basename(urlPath) || `audio-${Date.now()}`
   const baseName = path.basename(originalName, path.extname(originalName))
 
-  const audioPath = path.join(
-    TMP_DIR,
-    originalName.endsWith(`.${audioFormat}`) ? originalName : `${baseName}.${audioFormat}`
-  )
-  const transcriptPath = path.join(TMP_DIR, `${baseName}.txt`)
-  const ttlPath = path.join(TMP_DIR, `${baseName}.triples.ttl`)
+  const sourceDir = path.join(TMP_DIR, baseName)
+  await fsp.mkdir(sourceDir, { recursive: true })
+
+  const audioPath = path.join(sourceDir, `audio.${audioFormat}`)
+  const transcriptPath = path.join(sourceDir, `transcript.txt`)
+  const graphJSONPath = path.join(sourceDir, `graph.json`)
 
   // Download
   if (audioURL.includes('youtube.com') || audioURL.includes('youtu.be')) {
@@ -333,76 +343,51 @@ export default async function audioToDiagram(audioURL: string) {
     transcript = await transcribeAudioFile(audioPath, transcriptPath)
   }
 
-  // Generate nodes and relationships. If a TTL exists, parse it and use that as the source of truth.
+  // Generate nodes and relationships. If a graph JSON exists, load it and use that as the source of truth.
 
-  let nodes: string[]
-  let relationships: Relationship[]
+  let nodes: string[] = []
+  let relationships: Relationship[] = []
   let statements: string[] = []
-  if (await existsNonEmpty(ttlPath)) {
+  let loadedFromGraph = false
+  if (await existsNonEmpty(graphJSONPath)) {
     try {
-      const ttl = await fsp.readFile(ttlPath, 'utf8')
-      const parsed = await parseTTL(ttl)
+      const parsed = await loadGraphJSON(sourceDir)
       nodes = parsed.nodes
       relationships = parsed.relationships
       statements = parsed.statements
-      debug('Loaded nodes and relationships from TTL', ttlPath)
+      loadedFromGraph = true
+      debug('Loaded nodes and relationships from graph JSON', graphJSONPath)
     } catch (e) {
-      debug('Failed to parse TTL, regenerating nodes/relationships', e)
-      const useSDB = true // Boolean(process.env.USE_SYSTEM_DYNAMICS_TS)
-      // if (useSDB) {
-      // try {
-      const cld = await generateCausalRelationships(
-        transcript,
-        0.85,
-        true,
-        process.env.SDB_LLM_MODEL,
-        process.env.SDB_EMBEDDING_MODEL
-      )
-      if (cld.nodes.length === 0 || cld.relationships.length === 0) {
-        throw new Error('Failed to extract any nodes or relationships')
+      debug('Failed to load graph JSON, regenerating nodes/relationships', e)
+    }
+  }
+  if (!loadedFromGraph) {
+    const useSDB = Boolean(process.env.USE_SYSTEM_DYNAMICS_BOT)
+    let generatedFromSDB = false
+    if (useSDB) {
+      try {
+        const cld = await generateCausalRelationships(
+          transcript,
+          0.85,
+          true,
+          process.env.SDB_LLM_MODEL,
+          process.env.SDB_EMBEDDING_MODEL
+        )
+        if (cld.nodes.length === 0 || cld.relationships.length === 0) {
+          throw new Error('Failed to extract any nodes or relationships')
+        }
+        nodes = cld.nodes
+        relationships = cld.relationships
+        statements = cld.statements
+        generatedFromSDB = true
+      } catch (err) {
+        console.warn('System-Dynamics-Bot failed; falling back to LLM-based extraction:', (err as any)?.message || err)
       }
-      nodes = cld.nodes
-      relationships = cld.relationships
-      statements = cld.statements
-      // } catch (err) {
-      //   console.warn(
-      //     'System-Dynamics-Bot failed; falling back to LLM-based extraction:',
-      //     (err as any)?.message || err
-      //   )
-      //   nodes = await generateNodes(transcript)
-      //   relationships = await generateRelationships(transcript, nodes)
-      // }
-      // } else {
-      //   nodes = await generateNodes(transcript)
-      //   relationships = await generateRelationships(transcript, nodes)
-      // }
     }
-  } else {
-    // const useSDB = true //Boolean(process.env.USE_SYSTEM_DYNAMICS_TS)
-    // if (useSDB) {
-    //   try {
-    const cld = await generateCausalRelationships(
-      transcript,
-      0.85,
-      true,
-      process.env.SDB_LLM_MODEL,
-      process.env.SDB_EMBEDDING_MODEL
-    )
-    if (cld.nodes.length === 0 || cld.relationships.length === 0) {
-      throw new Error('Failed to extract any nodes or relationships')
+    if (!generatedFromSDB) {
+      nodes = await generateNodes(transcript)
+      relationships = await generateRelationships(transcript, nodes)
     }
-    nodes = cld.nodes
-    relationships = cld.relationships
-    statements = cld.statements
-    //   } catch (err) {
-    //     console.warn('System-Dynamics-Bot failed; falling back to LLM-based extraction:', (err as any)?.message || err)
-    //     nodes = await generateNodes(transcript)
-    //     relationships = await generateRelationships(transcript, nodes)
-    //   }
-    // } else {
-    //   nodes = await generateNodes(transcript)
-    //   relationships = await generateRelationships(transcript, nodes)
-    // }
   }
 
   // Filter out any nodes that don't appear in relationships (no subject/object links)
@@ -421,17 +406,24 @@ export default async function audioToDiagram(audioURL: string) {
     debug('Failed to filter nodes by relationships, keeping original nodes', e)
   }
 
+  // Ensure statements are available for graphviz exporter and persisted JSON
+  if (statements.length === 0 && relationships.length > 0) {
+    statements = relationshipsToStatements(relationships)
+  }
+
   const kumu = toKumuJSON(nodes, relationships)
 
-  const kumuPath = path.join(TMP_DIR, `${baseName}.kumu.json`)
+  const kumuPath = path.join(sourceDir, `kumu.json`)
   await fsp.writeFile(kumuPath, JSON.stringify(kumu, null, 2), 'utf8')
 
   // Prepare minimal per-base markers and output paths
-  const processingMarker = path.join(TMP_DIR, `${baseName}.processing`)
-  const mddPath = path.join(TMP_DIR, `${baseName}.mdd`)
-  const svgPath = path.join(TMP_DIR, `${baseName}.svg`)
-  const pngPath = path.join(TMP_DIR, `${baseName}.png`)
-  const dotPath = path.join(TMP_DIR, `${baseName}.dot`)
+  const processingMarker = path.join(sourceDir, `processing`)
+  const mermaidMDD = path.join(sourceDir, `mermaid.mdd`)
+  const mermaidSVG = path.join(sourceDir, `mermaid.svg`)
+  const mermaidPNG = path.join(sourceDir, `mermaid.png`)
+  const graphvizDOT = path.join(sourceDir, `graphviz.dot`)
+  const graphvizSVG = path.join(sourceDir, `graphviz.svg`)
+  const graphvizPNG = path.join(sourceDir, `graphviz.png`)
 
   // Create processing marker (write timestamp)
   try {
@@ -440,17 +432,17 @@ export default async function audioToDiagram(audioURL: string) {
     debug('Could not write processing marker', e)
   }
 
-  // Export RDF (Turtle) if missing or empty
+  // Export graph JSON if missing or empty
   try {
-    const needTTL = !(await existsNonEmpty(ttlPath))
-    if (needTTL) {
-      info('Writing RDF outputs for', baseName)
-      await exportRDF(TMP_DIR, baseName, nodes, relationships)
+    const needGraph = !(await existsNonEmpty(graphJSONPath))
+    if (needGraph) {
+      info('Writing graph JSON for', baseName)
+      await exportGraphJSON(sourceDir, nodes, relationships, statements)
     } else {
-      debug('RDF outputs already exist for', baseName)
+      debug('Graph JSON already exists for', baseName)
     }
   } catch (e: any) {
-    console.warn('Failed to export RDF for', baseName, e?.message ?? e)
+    console.warn('Failed to export graph JSON for', baseName, e?.message ?? e)
   }
 
   const graphType = process.env.DIAGRAM_EXPORTER || 'mermaid' // options: 'mermaid' or 'graphviz'
@@ -459,28 +451,28 @@ export default async function audioToDiagram(audioURL: string) {
   if (graphType === 'mermaid') {
     // Export Mermaid if missing
     try {
-      const needMDD = !(await existsNonEmpty(mddPath))
-      const needSVG = !(await existsNonEmpty(svgPath))
-      const needPNG = !(await existsNonEmpty(pngPath))
+      const needMDD = !(await existsNonEmpty(mermaidMDD))
+      const needSVG = !(await existsNonEmpty(mermaidSVG))
+      const needPNG = !(await existsNonEmpty(mermaidPNG))
       if (needMDD || needSVG || needPNG) {
-        info('Writing mermaid .mdd, .svg and .png for', baseName)
-        await exportMermaid(TMP_DIR, baseName, nodes, relationships)
+        info('Writing mermaid artifacts for', baseName)
+        await exportMermaid(sourceDir, 'mermaid', nodes, relationships)
       } else {
-        debug('.mdd already exists for', baseName)
+        debug('Mermaid artifacts already exist for', baseName)
       }
     } catch (e: any) {
       console.warn('Failed to export mermaid for', baseName, e?.message ?? e)
     }
   } else if (graphType === 'graphviz') {
     try {
-      const needDOT = !(await existsNonEmpty(dotPath))
-      const needSVG = !(await existsNonEmpty(svgPath))
-      const needPNG = !(await existsNonEmpty(pngPath))
+      const needDOT = !(await existsNonEmpty(graphvizDOT))
+      const needSVG = !(await existsNonEmpty(graphvizSVG))
+      const needPNG = !(await existsNonEmpty(graphvizPNG))
       if (needDOT || needSVG || needPNG) {
-        info('Writing graphviz .svg for', baseName)
-        await exportGraphViz(TMP_DIR, baseName, statements)
+        info('Writing graphviz artifacts for', baseName)
+        await exportGraphViz(sourceDir, 'graphviz', statements)
       } else {
-        debug('.svg already exists for', baseName)
+        debug('Graphviz artifacts already exist for', baseName)
       }
     } catch (e: any) {
       console.warn('Failed to export graphviz for', baseName, e?.message ?? e)
@@ -494,5 +486,18 @@ export default async function audioToDiagram(audioURL: string) {
     debug('Could not finalize markers for', baseName, e)
   }
 
-  return { kumuPath, svgPath, pngPath }
+  const activePNG = graphType === 'graphviz' ? graphvizPNG : mermaidPNG
+  const activeSVG = graphType === 'graphviz' ? graphvizSVG : mermaidSVG
+
+  return {
+    dir: sourceDir,
+    audioPath,
+    transcriptPath,
+    graphJSONPath,
+    kumuPath,
+    pngPath: activePNG,
+    svgPath: activeSVG,
+    mermaid: { mdd: mermaidMDD, svg: mermaidSVG, png: mermaidPNG },
+    graphviz: { dot: graphvizDOT, svg: graphvizSVG, png: graphvizPNG }
+  }
 }

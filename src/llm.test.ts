@@ -19,7 +19,7 @@ import { callLLM } from './llm'
 
 describe('callLLM', () => {
   it('returns JSON code-fence from ollama provider', async () => {
-    const res = await callLLM('system', 'user prompt', 'llama3.2', 'ollama')
+    const res = await callLLM('system', 'user prompt')
     expect(res.success).toBe(true)
     expect(res.data).toBeDefined()
     // should include a json code fence
