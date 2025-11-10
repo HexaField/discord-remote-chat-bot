@@ -1,7 +1,10 @@
 import cors from 'cors'
 import express, { Request, Response } from 'express'
 import fs from 'fs'
+import multer from 'multer'
 import path from 'path'
+import audioToDiagram from '../../src/audioToDiagram'
+import { generateCausalRelationships } from '../../src/cld'
 
 const app = express()
 app.use(cors())
@@ -137,6 +140,131 @@ app.get('/api/videos/:id/graph', (req: Request, res: Response) => {
     return res.json(raw)
   } catch (e) {
     res.status(500).json({ error: 'Failed to read graph' })
+  }
+})
+
+// Regenerate the graph for a given video id by re-running causal extraction on the
+// transcript. This will call the server-side generateCausalRelationships and write
+// an updated graph.json in the same directory.
+app.post('/api/videos/:id/regenerate', async (req: Request, res: Response) => {
+  const { id } = req.params
+  const item = readItems().find((v) => v.id === id)
+  if (!item) return res.status(404).json({ error: 'Not found' })
+  try {
+    // Build transcript array: prefer transcriptPath JSON, otherwise parse VTT
+    let transcripts: string[] = []
+    if (item.transcriptPath && fs.existsSync(item.transcriptPath)) {
+      const raw = fs.readFileSync(item.transcriptPath, 'utf8')
+      try {
+        const parsed = JSON.parse(raw)
+        if (Array.isArray(parsed)) {
+          // items may be strings or objects with `text`
+          if (parsed.length && typeof parsed[0] === 'string') transcripts = parsed
+          else transcripts = parsed.map((c: any) => (c && c.text ? String(c.text) : '')).filter(Boolean)
+        } else if (typeof parsed === 'string') transcripts = [parsed]
+      } catch (e) {
+        // not JSON, treat as raw text
+        if (raw.trim()) transcripts = [raw.trim()]
+      }
+    } else if (item.vttPath && fs.existsSync(item.vttPath)) {
+      const vtt = fs.readFileSync(item.vttPath, 'utf8')
+      const chunks = parseVtt(vtt)
+      transcripts = chunks.map((c) => c.text).filter(Boolean)
+    } else {
+      return res.status(404).json({ error: 'Transcript not found for regeneration' })
+    }
+
+    // run generator
+    const notify = (m: string) => console.log('[regen]', m)
+    const cld = await generateCausalRelationships(
+      transcripts,
+      notify,
+      0.85,
+      true,
+      process.env.SDB_LLM_MODEL,
+      process.env.SDB_EMBEDDING_MODEL
+    )
+
+    // write graph.json
+    const dir = path.join(DATA_ROOT, id)
+    const graphPath = path.join(dir, 'graph.json')
+    const out = { nodes: cld.nodes, relationships: cld.relationships }
+    fs.writeFileSync(graphPath, JSON.stringify(out, null, 2), 'utf8')
+
+    return res.json(out)
+  } catch (e: any) {
+    console.error('[regenerate] failed', e)
+    return res.status(500).json({ error: String(e?.message || e) })
+  }
+})
+
+// Multer setup to accept audio file uploads (use memory storage so we can place files
+// into the final DATA_ROOT/<id> directory rather than a shared uploads folder)
+const upload = multer({ storage: multer.memoryStorage() })
+
+// Import endpoint: accepts multipart file uploads (files field) or JSON body with 'text' newline-separated URLs
+app.post('/api/videos/import', upload.array('files'), async (req: Request, res: Response) => {
+  const results: any[] = []
+  try {
+    // helper notifier
+    const notify = (m: string) => console.log('[import]', m)
+
+    // Handle uploaded files (memory storage)
+    const files = (req as any).files as any[] | undefined
+    if (files && files.length) {
+      for (const f of files) {
+        try {
+          // derive an id from the original filename (sanitized)
+          const base = path.basename(f.originalname || 'upload')
+          const name = base.replace(path.extname(base), '')
+          const safe = name.replace(/[^a-zA-Z0-9-_]/g, '-').slice(0, 64) || `upload-${Date.now()}`
+          let id = safe
+          const targetDir = () => path.join(DATA_ROOT, id)
+          if (fs.existsSync(targetDir())) {
+            id = `${safe}-${Date.now()}`
+          }
+          const dir = path.join(DATA_ROOT, id)
+          fs.mkdirSync(dir, { recursive: true })
+          // write uploaded file to expected audio filename so audioToDiagram will pick it up
+          const dest = path.join(dir, `audio.mp3`)
+          fs.writeFileSync(dest, f.buffer)
+          // run full pipeline using file:// URL to the saved file
+          const fileUrl = `file://${dest}`
+          await audioToDiagram(fileUrl, notify, false)
+          results.push({ file: f.originalname, id, status: 'ok' })
+        } catch (e: any) {
+          console.error('[import] file failed', f.originalname, e)
+          results.push({ file: f.originalname, status: 'error', error: String(e?.message || e) })
+        }
+      }
+      return res.json({ results })
+    }
+
+    // Handle text body with URLs (newline separated)
+    if (req.is('application/json')) {
+      const body = req.body as any
+      const text = (body && (body.text || body.urls)) as string | undefined
+      if (!text) return res.status(400).json({ error: 'No text or urls provided' })
+      const lines = String(text)
+        .split(/\r?\n/)
+        .map((s) => s.trim())
+        .filter(Boolean)
+      for (const line of lines) {
+        try {
+          await audioToDiagram(line, notify, false)
+          results.push({ url: line, status: 'ok' })
+        } catch (e: any) {
+          console.error('[import] url failed', line, e)
+          results.push({ url: line, status: 'error', error: String(e?.message || e) })
+        }
+      }
+      return res.json({ results })
+    }
+
+    return res.status(400).json({ error: 'No files or urls provided' })
+  } catch (e: any) {
+    console.error('[import] failed', e)
+    return res.status(500).json({ error: String(e?.message || e) })
   }
 })
 

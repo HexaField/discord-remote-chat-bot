@@ -159,8 +159,6 @@ export default function VideoCard(props: { id: string }): JSX.Element {
 
   // handle node hover from GraphView
   function handleNodeHover(ev: { id: string; provenance?: any[] | null; x: number; y: number }) {
-    // highlight this node
-    setHighlightedNodes(new Set([ev.id]))
     // compute transcript chunks related to its provenance
     const idxs = provToChunkIndices(ev.provenance ?? undefined)
     setHoveredTranscriptIdxs(idxs.size ? idxs : null)
@@ -242,6 +240,12 @@ export default function VideoCard(props: { id: string }): JSX.Element {
               onNodeOut={handleNodeOut}
               onNodeClick={handleNodeClick}
               selectedNodeId={selectedNodeId()}
+              videoId={props.id}
+              onRegenerated={(d: any) => {
+                try {
+                  setGraph(d)
+                } catch (e) {}
+              }}
             />
           </div>
         </div>

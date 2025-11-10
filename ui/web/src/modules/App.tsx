@@ -8,11 +8,22 @@ export default function App() {
   const [selected, setSelected] = createSignal<string | null>(null)
 
   createEffect(() => {
+    // initial load
     fetch('/api/videos')
       .then((r) => r.json())
       .then(setVideos)
       .catch((err) => console.error('Failed to load videos', err))
   })
+
+  // helper to refresh videos list from server
+  async function refreshVideos() {
+    try {
+      const r = await fetch('/api/videos')
+      if (r.ok) setVideos(await r.json())
+    } catch (e) {
+      console.error('Failed to refresh videos', e)
+    }
+  }
 
   const [sidebarWidth, setSidebarWidth] = createSignal<number>(300)
   const [collapsed, setCollapsed] = createSignal<boolean>(false)
@@ -109,6 +120,48 @@ export default function App() {
         <div
           class="flex-none border-r bg-white h-full flex flex-col"
           style={{ width: collapsed() ? '56px' : `${sidebarWidth()}px` }}
+          onDrop={async (e: DragEvent) => {
+            e.preventDefault()
+            try {
+              const dt = e.dataTransfer
+              if (!dt) return
+              // files dropped
+              if (dt.files && dt.files.length > 0) {
+                const fd = new FormData()
+                for (let i = 0; i < dt.files.length; i++) fd.append('files', dt.files[i])
+                await fetch('/api/videos/import', { method: 'POST', body: fd })
+                await refreshVideos()
+                return
+              }
+              // text/uri list dropped
+              const text = dt.getData('text/plain') || dt.getData('text/uri-list')
+              if (text) {
+                await fetch('/api/videos/import', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ text })
+                })
+                await refreshVideos()
+              }
+            } catch (e) {
+              console.error('Import failed', e)
+            }
+          }}
+          onDragOver={(e: DragEvent) => e.preventDefault()}
+          onPaste={async (e: ClipboardEvent) => {
+            try {
+              const text = e.clipboardData?.getData('text/plain')
+              if (!text) return
+              await fetch('/api/videos/import', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text })
+              })
+              await refreshVideos()
+            } catch (err) {
+              console.error('Paste import failed', err)
+            }
+          }}
         >
           <div class="flex items-center justify-between p-2">
             <div class="flex items-center gap-2">

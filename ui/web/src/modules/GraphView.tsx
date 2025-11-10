@@ -23,7 +23,13 @@ export default function GraphView(props: {
   onNodeClick?: (arg: { id: string | null; provenance?: any[] | null; x?: number; y?: number }) => void
   // id of a node that should be treated as selected/focused in the view
   selectedNodeId?: string | null
+  // optional video id used by the regenerate button
+  videoId?: string
+  // callback invoked when a new graph JSON is available after regeneration
+  onRegenerated?: (data: { nodes: NodeDatum[]; links: LinkDatum[] } | null) => void
 }): JSX.Element {
+  const videoId = props.videoId
+  const onRegenerated = props.onRegenerated
   let container!: HTMLDivElement
   let svg!: SVGSVGElement
   let sim: d3.Simulation<NodeDatum, LinkDatum> | null = null
@@ -608,6 +614,28 @@ export default function GraphView(props: {
   return (
     <div ref={(el) => (container = el)} class="relative w-full h-full border rounded">
       <div class="absolute top-2 right-2 flex gap-2 z-10">
+        <button
+          class="px-2 py-1 text-sm bg-white border rounded shadow hover:bg-gray-50"
+          onClick={async () => {
+            if (!videoId) return
+            try {
+              const b = document.activeElement as HTMLElement // keep focus
+              // POST to trigger regeneration
+              await fetch(`/api/videos/${videoId}/regenerate`, { method: 'POST' })
+              // fetch updated graph
+              const r = await fetch(`/api/videos/${videoId}/graph`)
+              if (r.ok) {
+                const json = await r.json()
+                onRegenerated?.(json)
+              }
+              if (b) b.focus()
+            } catch (e) {
+              console.error('Regenerate failed', e)
+            }
+          }}
+        >
+          Regenerate
+        </button>
         <button class="px-2 py-1 text-sm bg-white border rounded shadow hover:bg-gray-50" onClick={zoomIn}>
           +
         </button>
