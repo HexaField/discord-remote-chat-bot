@@ -51,8 +51,8 @@ export default function GraphView(props: {
     const selection = d3.select(svg)
     svgSel = selection
     selection.selectAll('*').remove()
-    // ensure svg background is white
-    selection.style('background', '#ffffff')
+    // ensure svg background uses CSS variable so theme changes propagate
+    selection.style('background', 'var(--bg-card)')
 
     // compute container size so graph fills available space
     const rect = container?.getBoundingClientRect() ?? { width: 800, height: 400 }
@@ -189,13 +189,12 @@ export default function GraphView(props: {
 
     const link = zoomG
       .append('g')
-      .attr('stroke', '#999')
       .selectAll('line')
       .data(links)
       .enter()
       .append('line')
+      .attr('stroke', 'var(--muted)')
       .attr('stroke-opacity', 0.6)
-      
 
     // (arrow shapes are created after node label measurement so we have rect sizes)
 
@@ -268,13 +267,13 @@ export default function GraphView(props: {
     )
 
     nodeG.on('mouseover', function (event, d) {
-      d3.select(this).select('circle').attr('stroke', '#222').attr('stroke-width', 1.5)
+      d3.select(this).select('rect').attr('stroke', 'var(--text)').attr('stroke-width', 1.5)
       try {
         props.onNodeHover?.({ id: d.id, provenance: (d as any).provenance ?? null, x: event.clientX, y: event.clientY })
       } catch (e) {}
     })
     nodeG.on('mouseout', function () {
-      d3.select(this).select('circle').attr('stroke', null).attr('stroke-width', null)
+      d3.select(this).select('rect').attr('stroke', null).attr('stroke-width', null)
       try {
         props.onNodeOut?.()
       } catch (e) {}
@@ -307,10 +306,7 @@ export default function GraphView(props: {
       .attr('text-anchor', 'middle')
       .attr('dominant-baseline', 'central')
       // choose text colour for contrast: use black for light/amber nodes (actor), white otherwise
-      .attr('fill', (d: any) => {
-        const t = (d.type || '').toString().toLowerCase()
-        return t === 'actor' ? '#000' : '#fff'
-      })
+      .attr('fill', 'var(--on-accent)')
       .style('pointer-events', 'none')
 
     // measure label bbox and size the rect accordingly
@@ -345,7 +341,7 @@ export default function GraphView(props: {
       .append('path')
       .attr('class', 'link-arrow')
       .attr('d', 'M0,0 L-9,6 L-6,0 L-9,-6 Z')
-      .attr('fill', '#999')
+      .attr('fill', 'var(--muted)')
       .attr('pointer-events', 'none')
 
     sim.on('tick', () => {
@@ -487,7 +483,7 @@ export default function GraphView(props: {
     const nodeGroups = svgSel.selectAll('g.node-group')
     nodeGroups
       .select('rect')
-      .attr('stroke', (d: any) => (selId && d.id === selId ? '#222' : null))
+      .attr('stroke', (d: any) => (selId && d.id === selId ? 'var(--text)' : null))
       .attr('stroke-width', (d: any) => (selId && d.id === selId ? 1.5 : null))
     if (selId) {
       try {

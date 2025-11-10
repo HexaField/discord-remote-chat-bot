@@ -17,6 +17,64 @@ export default function App() {
   const [sidebarWidth, setSidebarWidth] = createSignal<number>(300)
   const [collapsed, setCollapsed] = createSignal<boolean>(false)
 
+  // Theme: 'system' | 'light' | 'dark'
+  const THEME_STORAGE = 'theme'
+  const [theme, setTheme] = createSignal<'system' | 'light' | 'dark'>('system')
+  let mediaQ: MediaQueryList | null = null
+
+  function applyTheme(t: 'system' | 'light' | 'dark') {
+    try {
+      if (t === 'dark') {
+        document.documentElement.classList.add('dark')
+      } else if (t === 'light') {
+        document.documentElement.classList.remove('dark')
+      } else {
+        // system
+        const mq = window.matchMedia('(prefers-color-scheme: dark)')
+        if (mq.matches) document.documentElement.classList.add('dark')
+        else document.documentElement.classList.remove('dark')
+      }
+    } catch (e) {}
+  }
+
+  function cycleTheme() {
+    const cur = theme()
+    const next = cur === 'system' ? 'light' : cur === 'light' ? 'dark' : 'system'
+    setTheme(next)
+    try {
+      localStorage.setItem(THEME_STORAGE, next)
+    } catch (e) {}
+    applyTheme(next)
+  }
+
+  onMount(() => {
+    try {
+      const saved = localStorage.getItem(THEME_STORAGE) as 'system' | 'light' | 'dark' | null
+      if (saved === 'light' || saved === 'dark' || saved === 'system') setTheme(saved)
+      else setTheme('system')
+    } catch (e) {
+      setTheme('system')
+    }
+    // apply initial theme
+    applyTheme(theme())
+
+    // listen for system preference changes when in 'system' mode
+    try {
+      mediaQ = window.matchMedia('(prefers-color-scheme: dark)')
+      const onChange = () => {
+        if (theme() === 'system') applyTheme('system')
+      }
+      // addEventListener may not exist on older browsers; fall back to addListener
+      if (mediaQ.addEventListener) mediaQ.addEventListener('change', onChange)
+      else if (mediaQ.addListener) mediaQ.addListener(onChange)
+      onCleanup(() => {
+        if (!mediaQ) return
+        if ((mediaQ as any).removeEventListener) (mediaQ as any).removeEventListener('change', onChange)
+        else if ((mediaQ as any).removeListener) (mediaQ as any).removeListener(onChange)
+      })
+    } catch (e) {}
+  })
+
   // read video from search params on mount and handle popstate
   onMount(() => {
     const params = new URLSearchParams(window.location.search)
@@ -64,7 +122,28 @@ export default function App() {
               {/* hide title when collapsed */}
               {!collapsed() && <span class="font-semibold">Videos</span>}
             </div>
-            {!collapsed() && <div class="text-xs text-gray-500">{videos().length} items</div>}
+            <div class="flex items-center gap-2">
+              {!collapsed() && <div class="text-xs text-gray-500">{videos().length} items</div>}
+              {/* Theme toggle: cycles system -> light -> dark */}
+              {!collapsed() && (
+                <button
+                  class="p-1 rounded hover:bg-gray-100 text-sm"
+                  onClick={cycleTheme}
+                  title="Cycle theme: System → Light → Dark"
+                >
+                  {theme() === 'system' && '🖥 System'}
+                  {theme() === 'light' && '🌞 Light'}
+                  {theme() === 'dark' && '🌙 Dark'}
+                </button>
+              )}
+              {collapsed() && (
+                <button class="p-1 rounded hover:bg-gray-100 text-sm" onClick={cycleTheme} title="Cycle theme">
+                  {theme() === 'system' && '🖥'}
+                  {theme() === 'light' && '🌞'}
+                  {theme() === 'dark' && '🌙'}
+                </button>
+              )}
+            </div>
           </div>
 
           <div class="flex-1 overflow-auto">
