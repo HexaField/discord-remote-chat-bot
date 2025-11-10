@@ -1,5 +1,5 @@
 import type { JSX } from 'solid-js'
-import { createEffect, createSignal, For, onMount } from 'solid-js'
+import { createEffect, createMemo, createSignal, For, onMount } from 'solid-js'
 import GraphView from './GraphView'
 
 interface TranscriptChunk {
@@ -17,9 +17,16 @@ interface GraphData {
 export default function VideoCard(props: { id: string }): JSX.Element {
   const [transcript, setTranscript] = createSignal<TranscriptChunk[]>([])
   const [graph, setGraph] = createSignal<GraphData | null>(null)
+  const [highlightedNodes, setHighlightedNodes] = createSignal<Set<string> | null>(null)
+  const [hoveredTranscriptIdxs, setHoveredTranscriptIdxs] = createSignal<Set<number> | null>(null)
+  const [tooltip, setTooltip] = createSignal<{
+    visible: boolean
+    x?: number
+    y?: number
+    items?: { idx?: number; start?: number; end?: number; text?: string }[]
+  }>({ visible: false })
   const [leftWidth, setLeftWidth] = createSignal<number | null>(null) // pixels or null (use flex)
   let leftEl: HTMLDivElement | undefined
-  let dividerEl: HTMLDivElement | undefined
 
   onMount(() => {
     // Initialize left width: prefer saved value in localStorage, otherwise default to 2/3 of available width.
@@ -72,6 +79,99 @@ export default function VideoCard(props: { id: string }): JSX.Element {
       .catch(() => {})
   })
 
+  // Build quick lookup maps from graph/transcript for provenance mapping
+  const nodeById = createMemo(() => {
+    const g = graph()
+    const m = new Map<string, any>()
+    if (!g) return m
+    for (const n of g.nodes) {
+      m.set(n.id, n)
+    }
+    return m
+  })
+
+  // heuristics: map provenance entries to transcript chunk indices
+  function provToChunkIndices(prov: any[] | undefined | null): Set<number> {
+    const out = new Set<number>()
+    if (!prov || !Array.isArray(prov)) return out
+    const tx = transcript()
+    for (const p of prov) {
+      // if provenance explicitly references chunk index
+      if (typeof p.chunkIndex === 'number') {
+        out.add(p.chunkIndex)
+        continue
+      }
+      if (typeof p.index === 'number') {
+        out.add(p.index)
+        continue
+      }
+      // if provenance gives start/end times, match overlapping transcript chunks
+      if (typeof p.start === 'number' || typeof p.end === 'number') {
+        const s = typeof p.start === 'number' ? p.start : -Infinity
+        const e = typeof p.end === 'number' ? p.end : Infinity
+        tx.forEach((c, i) => {
+          const cs = c.start ?? -Infinity
+          const ce = c.end ?? Infinity
+          if (!(ce < s || cs > e)) out.add(i)
+        })
+        continue
+      }
+      // if provenance references transcript text, try to find chunk containing that text
+      if (typeof p.text === 'string') {
+        const needle = p.text.trim().slice(0, 80)
+        tx.forEach((c, i) => {
+          if (c.text && c.text.includes(needle)) out.add(i)
+        })
+        continue
+      }
+      // if provenance references node indices or ids, skip here
+    }
+    return out
+  }
+
+  // find node ids that reference a transcript index
+  function nodesForTranscriptIndex(idx: number): Set<string> {
+    const out = new Set<string>()
+    const g = graph()
+    if (!g) return out
+    for (const n of g.nodes) {
+      const prov = (n as any).provenance
+      if (!prov) continue
+      const idxs = provToChunkIndices(prov)
+      if (idxs.has(idx)) out.add(n.id)
+    }
+    return out
+  }
+
+  // handle node hover from GraphView
+  function handleNodeHover(ev: { id: string; provenance?: any[] | null; x: number; y: number }) {
+    // highlight this node
+    setHighlightedNodes(new Set([ev.id]))
+    // compute transcript chunks related to its provenance
+    const idxs = provToChunkIndices(ev.provenance ?? undefined)
+    setHoveredTranscriptIdxs(idxs.size ? idxs : null)
+    // prepare tooltip items
+    const items: { idx?: number; start?: number; end?: number; text?: string }[] = []
+    if (idxs.size) {
+      const tx = transcript()
+      for (const i of Array.from(idxs)) {
+        const c = tx[i]
+        if (c) items.push({ idx: i, start: c.start, end: c.end, text: c.text })
+      }
+    } else if (ev.provenance && ev.provenance.length) {
+      for (const p of ev.provenance) {
+        items.push({ start: p.start, end: p.end, text: p.text })
+      }
+    }
+    setTooltip({ visible: true, x: ev.x, y: ev.y, items })
+  }
+
+  function handleNodeOut() {
+    setHighlightedNodes(null)
+    setHoveredTranscriptIdxs(null)
+    setTooltip({ visible: false })
+  }
+
   return (
     <div class="space-y-4 h-full">
       {/* two-column resizable: graph left, transcript+video right */}
@@ -82,12 +182,17 @@ export default function VideoCard(props: { id: string }): JSX.Element {
         >
           <h2 class="font-semibold mb-2">Graph</h2>
           <div class="h-full border rounded bg-white">
-            <GraphView data={graph()} />
+            <GraphView
+              data={graph()}
+              highlightedNodes={highlightedNodes()}
+              onNodeHover={handleNodeHover}
+              onNodeOut={handleNodeOut}
+            />
           </div>
         </div>
 
         {/* Divider / drag handle (only on md+) */}
-        <div class="hidden md:flex items-center" ref={(el) => (dividerEl = el)}>
+        <div class="hidden md:flex items-center">
           <div class="w-2 h-full cursor-col-resize" style="touch-action: none;" onMouseDown={startDrag}>
             <div class="w-0.5 h-full mx-auto bg-gray-200" />
           </div>
@@ -95,14 +200,56 @@ export default function VideoCard(props: { id: string }): JSX.Element {
 
         <div class="flex-1 min-w-0">
           <h2 class="font-semibold mb-2">Transcript</h2>
-          <div class="max-h-[240px] overflow-y-auto space-y-1 text-sm p-2 bg-white rounded border">
+          <div class="max-h-[240px] overflow-y-auto space-y-1 text-sm p-2 bg-white rounded border relative">
             <For each={transcript()}>
-              {(chunk) => (
-                <div class="p-1 rounded hover:bg-gray-50">
-                  <span>{chunk.text}</span>
-                </div>
-              )}
+              {(chunk, i) => {
+                const idx = i()
+                const isHighlighted = () => (hoveredTranscriptIdxs() ? hoveredTranscriptIdxs()!.has(idx) : false)
+                return (
+                  <div
+                    class={'p-1 rounded cursor-default ' + (isHighlighted() ? 'bg-yellow-50' : 'hover:bg-gray-50')}
+                    onMouseEnter={() => {
+                      // compute nodes that reference this transcript chunk
+                      const nodes = nodesForTranscriptIndex(idx)
+                      setHighlightedNodes(nodes.size ? nodes : null)
+                      setHoveredTranscriptIdxs(nodes.size ? new Set([idx]) : new Set([idx]))
+                    }}
+                    onMouseLeave={() => {
+                      setHighlightedNodes(null)
+                      setHoveredTranscriptIdxs(null)
+                    }}
+                  >
+                    <span>{chunk.text}</span>
+                  </div>
+                )
+              }}
             </For>
+
+            {/* tooltip shown when hovering a node */}
+            {tooltip().visible && (
+              <div
+                class="absolute z-20 p-2 bg-white border rounded shadow text-xs max-w-xs"
+                style={{
+                  left: `${tooltip().x ?? 0}px`,
+                  top: `${tooltip().y ?? 0}px`,
+                  transform: 'translate(8px, 8px)'
+                }}
+              >
+                <For each={tooltip().items ?? []}>
+                  {(it) => (
+                    <div class="mb-1">
+                      {it.idx !== undefined ? <div class="text-[10px] text-gray-500">Chunk #{it.idx}</div> : null}
+                      {it.start !== undefined || it.end !== undefined ? (
+                        <div class="text-[10px] text-gray-500">
+                          {it.start ?? ''} - {it.end ?? ''}
+                        </div>
+                      ) : null}
+                      <div class="text-[12px]">{it.text}</div>
+                    </div>
+                  )}
+                </For>
+              </div>
+            )}
           </div>
 
           {/* Video under the transcript */}

@@ -2,7 +2,7 @@ import * as d3 from 'd3'
 import type { JSX } from 'solid-js'
 import { createEffect, onCleanup, onMount } from 'solid-js'
 
-type NodeDatum = d3.SimulationNodeDatum & { id: string; label?: string; type?: string }
+type NodeDatum = d3.SimulationNodeDatum & { id: string; label?: string; type?: string; provenance?: any }
 
 type LinkDatum = d3.SimulationLinkDatum<NodeDatum> & {
   source: string | NodeDatum
@@ -10,7 +10,14 @@ type LinkDatum = d3.SimulationLinkDatum<NodeDatum> & {
   label?: string
 }
 
-export default function GraphView(props: { data: { nodes: NodeDatum[]; links: LinkDatum[] } | null }): JSX.Element {
+export default function GraphView(props: {
+  data: { nodes: NodeDatum[]; links: LinkDatum[] } | null
+  // set of node ids to highlight (others will be dimmed)
+  highlightedNodes?: Set<string> | null
+  // optional callback when user hovers a node: { id, provenance, x, y }
+  onNodeHover?: (arg: { id: string; provenance?: any[] | null; x: number; y: number }) => void
+  onNodeOut?: () => void
+}): JSX.Element {
   let container!: HTMLDivElement
   let svg!: SVGSVGElement
   let sim: d3.Simulation<NodeDatum, LinkDatum> | null = null
@@ -25,7 +32,13 @@ export default function GraphView(props: { data: { nodes: NodeDatum[]; links: Li
 
   function render() {
     if (!props.data) return
-    const nodes: NodeDatum[] = props.data.nodes.map((n) => ({ ...n }))
+    // compute node radii based on label length so labels can sit inside nodes
+    const nodes: NodeDatum[] = props.data.nodes.map((n) => {
+      const label = (n.label ?? n.id ?? '').toString()
+      const base = 8
+      const extra = Math.min(28, Math.max(0, Math.floor(label.length * 0.45)))
+      return { ...n, r: base + extra }
+    })
     const links: LinkDatum[] = props.data.links.map((l) => ({ ...l }))
 
     const selection = d3.select(svg)
@@ -60,64 +73,126 @@ export default function GraphView(props: { data: { nodes: NodeDatum[]; links: Li
       })
     selection.call(zoomBehavior as any)
 
-    sim = d3
-      .forceSimulation<NodeDatum>(nodes)
+    // Configure forces to keep graph compact and avoid large expansion when
+    // nodes are dragged. We use milder repulsion, a stronger link force with
+    // shorter distance, weak x/y centering forces and a small collision
+    // radius. Also increase alpha decay so simulations settle faster.
+    sim = d3.forceSimulation<NodeDatum>(nodes)
       .force(
         'link',
         d3
           .forceLink<NodeDatum, LinkDatum>(links)
           .id((d) => d.id)
-          .distance(60)
+          // distance depends on node radii so larger nodes keep more separation
+          .distance((d: any) => {
+            const s = typeof d.source === 'string' ? 12 : (d.source.r ?? 12)
+            const t = typeof d.target === 'string' ? 12 : (d.target.r ?? 12)
+            return Math.max(40, s + t + 12)
+          })
+          .strength(0.8)
       )
-      .force('charge', d3.forceManyBody().strength(-100))
+      .force('charge', d3.forceManyBody().strength(-40))
       .force('center', d3.forceCenter(w / 2, h / 2))
+      .force('x', d3.forceX(w / 2).strength(0.02))
+      .force('y', d3.forceY(h / 2).strength(0.02))
+      .force('collide', d3.forceCollide<NodeDatum>().radius((d: any) => (d.r ?? 8) + 4).strength(0.7))
+      .alphaDecay(0.05)
 
-    const link = zoomG
+    const link = zoomG.append('g').attr('stroke', '#999').selectAll('line').data(links).enter().append('line').attr('stroke-opacity', 0.6)
+
+    // link labels (predicate info) as + or -
+    const linkLabel = zoomG
       .append('g')
-      .attr('stroke', '#999')
-      .selectAll('line')
+      .attr('class', 'link-labels')
+      .selectAll('text')
       .data(links)
       .enter()
-      .append('line')
-      .attr('stroke-opacity', 0.6)
-
-    const node = zoomG
-      .append('g')
-      .selectAll('circle')
-      .data(nodes)
-      .enter()
-      .append('circle')
-      .attr('r', 6)
-      .attr('fill', (d) => (d.type === 'entity' ? '#2563eb' : '#16a34a'))
-      .call(
-        d3
-          .drag<SVGCircleElement, NodeDatum>()
-          .on('start', (event, d) => {
-            if (!event.active && sim) sim.alphaTarget(0.3).restart()
-            d.fx = d.x
-            d.fy = d.y
-          })
-          .on('drag', (event, d) => {
-            d.fx = event.x
-            d.fy = event.y
-          })
-          .on('end', (event, d) => {
-            if (!event.active && sim) sim.alphaTarget(0)
-            d.fx = null
-            d.fy = null
-          })
-      )
-
-    const label = zoomG
-      .append('g')
-      .selectAll('text')
-      .data(nodes)
-      .enter()
       .append('text')
-      .text((d) => d.label ?? d.id)
+      .attr('class', 'link-label')
       .attr('font-size', 10)
-      .attr('dx', 8)
-      .attr('dy', 4)
+      .attr('text-anchor', 'middle')
+      .attr('fill', '#333')
+      .attr('pointer-events', 'none')
+      .text((d) => {
+        const lbl = (d.label || '').toString()
+        const l = lbl.toLowerCase()
+        // heuristic: negative predicates contain words like 'not', 'neg', 'false', or explicit '-'
+        if (l.includes('not') || l.includes('neg') || l.includes('false') || l.includes('-') || l.startsWith('!')) return '-'
+        return '+'
+      })
+
+    // create node groups so label can be centered inside circle
+    const nodeG = zoomG
+      .append('g')
+      .selectAll('g')
+      .data(nodes)
+      .enter()
+      .append('g')
+      .attr('class', 'node-group')
+
+    // rectangle node background (will size after measuring text bbox)
+    const bgRect = nodeG
+      .append('rect')
+      .attr('width', (d: any) => d.r ?? 16)
+      .attr('height', (d: any) => d.r ?? 16)
+      .attr('x', (d: any) => -(d.r ?? 16) / 2)
+      .attr('y', (d: any) => -(d.r ?? 16) / 2)
+      .attr('rx', 6)
+      .attr('ry', 6)
+      .attr('fill', (d) => (d.type === 'entity' ? '#2563eb' : '#16a34a'))
+      .attr('opacity', (d) => (props.highlightedNodes && props.highlightedNodes.size ? (props.highlightedNodes.has(d.id) ? 1 : 0.12) : 1))
+
+    // attach drag to groups so the whole label+circle moves together
+    nodeG.call(
+      d3
+        .drag<SVGGElement, NodeDatum>()
+        .on('start', (event, d) => {
+          if (!event.active && sim) sim.alphaTarget(0.06).restart()
+          d.fx = d.x
+          d.fy = d.y
+        })
+        .on('drag', (event, d) => {
+          d.fx = event.x
+          d.fy = event.y
+        })
+        .on('end', (event, d) => {
+          if (!event.active && sim) sim.alphaTarget(0)
+          d.fx = null
+          d.fy = null
+        })
+    )
+
+    nodeG.on('mouseover', function (event, d) {
+      d3.select(this).select('circle').attr('stroke', '#222').attr('stroke-width', 1.5)
+      try {
+        props.onNodeHover?.({ id: d.id, provenance: (d as any).provenance ?? null, x: event.clientX, y: event.clientY })
+      } catch (e) {}
+    })
+    nodeG.on('mouseout', function () {
+      d3.select(this).select('circle').attr('stroke', null).attr('stroke-width', null)
+      try {
+        props.onNodeOut?.()
+      } catch (e) {}
+    })
+
+    const label = nodeG.append('text').text((d: any) => d.label ?? d.id).attr('font-size', 10).attr('text-anchor', 'middle').attr('dominant-baseline', 'central').attr('fill', '#fff').style('pointer-events', 'none')
+
+    // measure label bbox and size the rect accordingly
+    label.each(function (d: any) {
+      try {
+        const textEl = this as SVGTextElement
+        const bbox = textEl.getBBox()
+        const pad = 8
+        const w = Math.max(24, bbox.width + pad * 2)
+        const h = Math.max(18, bbox.height + pad * 2)
+        d.__rectW = w
+        d.__rectH = h
+        const g = d3.select(this.parentNode as SVGGElement)
+        g.select('rect').attr('width', w).attr('height', h).attr('x', -w / 2).attr('y', -h / 2)
+      } catch (e) {
+        // if getBBox fails (rare), leave defaults
+      }
+    })
 
     sim.on('tick', () => {
       link
@@ -126,10 +201,51 @@ export default function GraphView(props: { data: { nodes: NodeDatum[]; links: Li
         .attr('x2', (d) => (typeof d.target === 'string' ? 0 : d.target.x) as number)
         .attr('y2', (d) => (typeof d.target === 'string' ? 0 : d.target.y) as number)
 
-      node.attr('cx', (d) => d.x as number).attr('cy', (d) => d.y as number)
-      label.attr('x', (d) => (d.x as number) + 8).attr('y', (d) => (d.y as number) + 4)
+      // position link labels at link midpoints
+      linkLabel
+        .attr('x', (d) => {
+          const sx = typeof d.source === 'string' ? 0 : (d.source.x as number)
+          const tx = typeof d.target === 'string' ? 0 : (d.target.x as number)
+          return (sx + tx) / 2
+        })
+        .attr('y', (d) => {
+          const sy = typeof d.source === 'string' ? 0 : (d.source.y as number)
+          const ty = typeof d.target === 'string' ? 0 : (d.target.y as number)
+          return (sy + ty) / 2 - 8
+        })
+      // position node groups by translating the group to node x/y
+      nodeG.attr('transform', (d: any) => `translate(${d.x},${d.y})`)
     })
   }
+
+  // react to highlight changes without rebuilding the simulation
+  createEffect(() => {
+    // access prop to track changes
+    const h = props.highlightedNodes
+    if (!svgSel) return
+    // update node/link opacity based on highlightedNodes
+    const selNodes = svgSel.selectAll('circle')
+    const selLinks = svgSel.selectAll('line')
+    const selLinkLabels = svgSel.selectAll('text.link-label')
+    if (h && h.size) {
+      selNodes.attr('opacity', (d: any) => (h.has(d.id) ? 1 : 0.12))
+      selLinks.attr('opacity', (d: any) => {
+        // if either end is highlighted, keep link visible
+        const s = typeof d.source === 'string' ? d.source : d.source.id
+        const t = typeof d.target === 'string' ? d.target : d.target.id
+        return h.has(s) || h.has(t) ? 0.9 : 0.08
+      })
+      selLinkLabels.attr('opacity', (d: any) => {
+        const s = typeof d.source === 'string' ? d.source : d.source.id
+        const t = typeof d.target === 'string' ? d.target : d.target.id
+        return h.has(s) || h.has(t) ? 1 : 0.12
+      })
+    } else {
+      selNodes.attr('opacity', 1)
+      selLinks.attr('opacity', 0.6)
+      selLinkLabels.attr('opacity', 1)
+    }
+  })
 
   // Update svg/view size and the force center without restarting the simulation.
   function updateSize() {
@@ -149,17 +265,17 @@ export default function GraphView(props: { data: { nodes: NodeDatum[]; links: Li
   // Fit all nodes into view with padding
   const reframe = () => {
     if (!svgSel || !zoomBehavior) return
-    const svgNode = svgSel.node()
-    if (!svgNode) return
-    const circles = svgNode.querySelectorAll('circle')
-    if (!circles || circles.length === 0) return
+    // Prefer to compute bounding box from simulation node positions so we
+    // don't rely on DOM attributes that may be relative (groups with transforms).
+    const snodes = sim ? sim.nodes() : []
+    if (!snodes || snodes.length === 0) return
     let minX = Infinity,
       minY = Infinity,
       maxX = -Infinity,
       maxY = -Infinity
-    circles.forEach((c) => {
-      const cx = parseFloat(c.getAttribute('cx') || '0')
-      const cy = parseFloat(c.getAttribute('cy') || '0')
+    snodes.forEach((n: any) => {
+      const cx = n.x
+      const cy = n.y
       if (Number.isFinite(cx) && Number.isFinite(cy)) {
         minX = Math.min(minX, cx)
         minY = Math.min(minY, cy)
@@ -167,7 +283,6 @@ export default function GraphView(props: { data: { nodes: NodeDatum[]; links: Li
         maxY = Math.max(maxY, cy)
       }
     })
-    if (minX === Infinity) return
     const bw = Math.max(1, maxX - minX)
     const bh = Math.max(1, maxY - minY)
     const pad = 40 // pixels padding
@@ -208,6 +323,11 @@ export default function GraphView(props: { data: { nodes: NodeDatum[]; links: Li
     // access to track
     const d = props.data
     if (!d) return
+    // Only rebuild the simulation when the actual data reference changes.
+    // This prevents unrelated prop updates (like hover/highlight sets) from
+    // stopping/restarting the D3 simulation.
+    if ((render as any).__lastData === d) return
+    ;(render as any).__lastData = d
     // stop any running simulation and rerender with new data
     sim?.stop()
     render()
