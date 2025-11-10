@@ -51,8 +51,15 @@ export function extractRelationships(raw: string) {
 
 export type Relationship = { subject: string; predicate: string; object: string }
 
-export function toKumuJSON(nodes: string[], relationships: Relationship[]) {
-  const elements = Array.from(new Set(nodes)).map((label) => ({ label }))
+export function toKumuJSON(nodes: Array<string | { label?: string; type?: string }>, relationships: Relationship[]) {
+  // Normalize nodes to element objects preserving optional type metadata
+  const labels: string[] = Array.from(
+    new Set((nodes || []).map((n) => (typeof n === 'string' ? n : n.label || String(n))))
+  )
+  const elements = labels.map((label) => {
+    const src = (nodes || []).find((n) => (typeof n === 'string' ? n === label : (n.label || '') === label))
+    return typeof src === 'object' ? { label, type: (src as any).type } : { label }
+  })
 
   const connections: Array<{ from: string; to: string; label?: string }> = []
   for (const rel of relationships) {
@@ -402,7 +409,7 @@ export default async function audioToDiagram(audioURL: string, onProgress?: (mes
 
   // Generate nodes and relationships. If a graph JSON exists, load it and use that as the source of truth.
 
-  let nodes: string[] = []
+  let nodes: Array<string | { label?: string; type?: string }> = []
   let relationships: Relationship[] = []
   let statements: string[] = []
   let loadedFromGraph = false
@@ -460,7 +467,10 @@ export default async function audioToDiagram(audioURL: string, onProgress?: (mes
       if (r.object) relNodeSet.add(r.object)
     }
     const before = nodes.length
-    nodes = nodes.filter((n) => relNodeSet.has(n))
+    nodes = nodes.filter((n: any) => {
+      const label = typeof n === 'string' ? n : n.label || ''
+      return relNodeSet.has(label)
+    })
     const after = nodes.length
     if (before !== after) debug(`Filtered ${before - after} disconnected node(s)`)
   } catch (e) {

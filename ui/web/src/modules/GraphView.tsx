@@ -77,7 +77,8 @@ export default function GraphView(props: {
     // nodes are dragged. We use milder repulsion, a stronger link force with
     // shorter distance, weak x/y centering forces and a small collision
     // radius. Also increase alpha decay so simulations settle faster.
-    sim = d3.forceSimulation<NodeDatum>(nodes)
+    sim = d3
+      .forceSimulation<NodeDatum>(nodes)
       .force(
         'link',
         d3
@@ -95,10 +96,23 @@ export default function GraphView(props: {
       .force('center', d3.forceCenter(w / 2, h / 2))
       .force('x', d3.forceX(w / 2).strength(0.02))
       .force('y', d3.forceY(h / 2).strength(0.02))
-      .force('collide', d3.forceCollide<NodeDatum>().radius((d: any) => (d.r ?? 8) + 4).strength(0.7))
+      .force(
+        'collide',
+        d3
+          .forceCollide<NodeDatum>()
+          .radius((d: any) => (d.r ?? 8) + 4)
+          .strength(0.7)
+      )
       .alphaDecay(0.05)
 
-    const link = zoomG.append('g').attr('stroke', '#999').selectAll('line').data(links).enter().append('line').attr('stroke-opacity', 0.6)
+    const link = zoomG
+      .append('g')
+      .attr('stroke', '#999')
+      .selectAll('line')
+      .data(links)
+      .enter()
+      .append('line')
+      .attr('stroke-opacity', 0.6)
 
     // link labels (predicate info) as + or -
     const linkLabel = zoomG
@@ -117,18 +131,13 @@ export default function GraphView(props: {
         const lbl = (d.label || '').toString()
         const l = lbl.toLowerCase()
         // heuristic: negative predicates contain words like 'not', 'neg', 'false', or explicit '-'
-        if (l.includes('not') || l.includes('neg') || l.includes('false') || l.includes('-') || l.startsWith('!')) return '-'
+        if (l.includes('not') || l.includes('neg') || l.includes('false') || l.includes('-') || l.startsWith('!'))
+          return '-'
         return '+'
       })
 
     // create node groups so label can be centered inside circle
-    const nodeG = zoomG
-      .append('g')
-      .selectAll('g')
-      .data(nodes)
-      .enter()
-      .append('g')
-      .attr('class', 'node-group')
+    const nodeG = zoomG.append('g').selectAll('g').data(nodes).enter().append('g').attr('class', 'node-group')
 
     // rectangle node background (will size after measuring text bbox)
     const bgRect = nodeG
@@ -139,8 +148,20 @@ export default function GraphView(props: {
       .attr('y', (d: any) => -(d.r ?? 16) / 2)
       .attr('rx', 6)
       .attr('ry', 6)
-      .attr('fill', (d) => (d.type === 'entity' ? '#2563eb' : '#16a34a'))
-      .attr('opacity', (d) => (props.highlightedNodes && props.highlightedNodes.size ? (props.highlightedNodes.has(d.id) ? 1 : 0.12) : 1))
+      // colour nodes by their semantic type (driver/obstacle/actor/other)
+      .attr('fill', (d: any) => {
+        const t = (d.type || '').toString().toLowerCase()
+        const map: { [k: string]: string } = {
+          driver: '#88cc88',
+          obstacle: '#ff8888',
+          actor: '#ffcc66',
+          other: '#88aaff'
+        }
+        return map[t] || map['other']
+      })
+      .attr('opacity', (d) =>
+        props.highlightedNodes && props.highlightedNodes.size ? (props.highlightedNodes.has(d.id) ? 1 : 0.12) : 1
+      )
 
     // attach drag to groups so the whole label+circle moves together
     nodeG.call(
@@ -175,7 +196,18 @@ export default function GraphView(props: {
       } catch (e) {}
     })
 
-    const label = nodeG.append('text').text((d: any) => d.label ?? d.id).attr('font-size', 10).attr('text-anchor', 'middle').attr('dominant-baseline', 'central').attr('fill', '#fff').style('pointer-events', 'none')
+    const label = nodeG
+      .append('text')
+      .text((d: any) => d.label ?? d.id)
+      .attr('font-size', 10)
+      .attr('text-anchor', 'middle')
+      .attr('dominant-baseline', 'central')
+      // choose text colour for contrast: use black for light/amber nodes (actor), white otherwise
+      .attr('fill', (d: any) => {
+        const t = (d.type || '').toString().toLowerCase()
+        return t === 'actor' ? '#000' : '#fff'
+      })
+      .style('pointer-events', 'none')
 
     // measure label bbox and size the rect accordingly
     label.each(function (d: any) {
@@ -188,7 +220,11 @@ export default function GraphView(props: {
         d.__rectW = w
         d.__rectH = h
         const g = d3.select(this.parentNode as SVGGElement)
-        g.select('rect').attr('width', w).attr('height', h).attr('x', -w / 2).attr('y', -h / 2)
+        g.select('rect')
+          .attr('width', w)
+          .attr('height', h)
+          .attr('x', -w / 2)
+          .attr('y', -h / 2)
       } catch (e) {
         // if getBBox fails (rare), leave defaults
       }

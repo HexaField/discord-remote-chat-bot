@@ -23,6 +23,9 @@ export type VerifiedRelationship = {
   provenance?: any
 }
 
+export type NodeType = 'driver' | 'obstacle' | 'actor' | 'other'
+export type Node = { label: string; type?: NodeType; provenance?: any }
+
 function simpleSentenceSplit(text: string): string[] {
   // very simple sentence splitter
   return text
@@ -255,6 +258,8 @@ export async function generateCausalRelationships(
     createdAt: string
     verifiedAt: string
     provenance?: any
+    subjectType?: NodeType
+    objectType?: NodeType
   }>
 
   for (const e of uniqMap.values()) {
@@ -263,7 +268,65 @@ export async function generateCausalRelationships(
     relationships.push(e)
   }
 
-  return { nodes, relationships }
+  // Classify each node into one of the provided categories using the LLM, with
+  // a small local heuristic fallback. The classification is attached to each
+  // relationship as subjectType/objectType so downstream exporters can style
+  // nodes without requiring a breaking change to the nodes array shape.
+  async function classifyNodes(nodeList: string[], textContext: string, llmModelLocal = llmModel) {
+    const out: { [k: string]: NodeType } = {}
+    if (!nodeList || nodeList.length === 0) return out
+
+    // Prepare a compact instruction asking for a JSON mapping
+    const sys = `You are a System Dynamics Modeler. Given a list of variable names, classify each variable into one of the following categories: 
+- driver: external positive influences, generators, attractors, or outcomes/goals
+- obstacle: things that steer the system away from its goals (barriers, friction)
+- actor: people, agents, or processes that operate in/through the system
+- other: none of the above
+
+Return ONLY a single JSON object mapping the variable name to one of the strings: driver, obstacle, actor, other. Example: {"work remaining":"other","fatigue":"obstacle"}`
+
+    const promptBody = nodeList.join('\n') + '\n\nContext:\n' + (textContext || '')
+    try {
+      onProgress(`Classifying ${nodeList.length} nodes...`)
+      const resp = await callLLM(sys, promptBody, 'ollama', llmModelLocal)
+      if (resp && resp.success && resp.data) {
+        const parsed = loadJson(String(resp.data))
+        if (parsed && typeof parsed === 'object') {
+          for (const k of Object.keys(parsed)) {
+            const v = String(parsed[k] || '').toLowerCase()
+            if (v === 'driver' || v === 'obstacle' || v === 'actor' || v === 'other') out[k] = v as NodeType
+          }
+        }
+      }
+    } catch (e) {
+      debug('Node classification LLM failed, falling back to heuristics', e)
+    }
+
+    // Fallback heuristics for any nodes not classified by LLM
+    for (const n of nodeList) {
+      if (out[n]) continue
+      const s = n.toLowerCase()
+      if (/(people|person|user|agent|engineer|team|staff|worker|customer|audience)/.test(s)) out[n] = 'actor'
+      else if (/(goal|target|outcome|result|throughput|completion|increase|growth|gain)/.test(s)) out[n] = 'driver'
+      else if (/(barrier|obstacle|friction|cost|delay|fatigue|error|loss|drop|resist)/.test(s)) out[n] = 'obstacle'
+      else out[n] = 'other'
+    }
+
+    return out
+  }
+
+  const nodeTypes = await classifyNodes(nodes, sentences.join('\n'))
+
+  // Convert nodes to objects with types
+  const nodesWithTypes: Node[] = nodes.map((n) => ({ label: n, type: nodeTypes[n] || 'other' }))
+
+  // Also attach types to relationships for backward compatibility
+  for (const r of relationships) {
+    r.subjectType = nodeTypes[String(r.subject)] || (nodeTypes[String(r.subject).toLowerCase()] as NodeType) || 'other'
+    r.objectType = nodeTypes[String(r.object)] || (nodeTypes[String(r.object).toLowerCase()] as NodeType) || 'other'
+  }
+
+  return { nodes: nodesWithTypes, relationships }
 }
 
 async function initEmbeddings(sentences: string[], embeddingModel: string) {
@@ -326,7 +389,9 @@ async function checkCausalRelationships(entry: RelationshipEntry, llmModel = 'll
   } else if (steps.includes('3') || steps.includes('4')) {
     predicate = 'negative'
   } else {
-    throw new Error('Unexpected answer while verifying causal relationship' + JSON.stringify(parsed))
+    throw new Error(
+      'Unexpected answer while verifying causal relationship' + JSON.stringify(parsed) + JSON.stringify(steps)
+    )
   }
 
   const verificationReasoning = parsed && parsed.reasoning ? String(parsed.reasoning) : ''

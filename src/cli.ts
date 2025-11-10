@@ -64,9 +64,9 @@ async function cmdKumu(input: string, output: string) {
     throw new Error("Input graph must contain arrays 'nodes' and 'relationships' (or 'elements'/'connections')")
   }
 
-  const nodes: string[] = rawNodes
-    .map((n: any) => (typeof n === 'string' ? n : (n.label ?? n.name ?? String(n))))
-    .filter(Boolean)
+  const nodes = rawNodes
+    .map((n: any) => (typeof n === 'string' ? { label: n } : { label: n.label ?? n.name ?? String(n), type: n.type }))
+    .filter((n) => n && (n as any).label)
 
   const relationships: Relationship[] = []
   for (const r of rawRels) {
@@ -107,9 +107,9 @@ async function cmdMermaid(input: string, output: string) {
     throw new Error("Input graph must contain arrays 'nodes' and 'relationships' (or 'elements'/'connections')")
   }
 
-  const nodes: string[] = rawNodes
-    .map((n: any) => (typeof n === 'string' ? n : (n.label ?? n.name ?? String(n))))
-    .filter(Boolean)
+  const nodes = rawNodes
+    .map((n: any) => (typeof n === 'string' ? { label: n } : { label: n.label ?? n.name ?? String(n), type: n.type }))
+    .filter((n) => n && (n as any).label)
   const relationships: Relationship[] = []
   for (const r of rawRels) {
     if (!r) continue

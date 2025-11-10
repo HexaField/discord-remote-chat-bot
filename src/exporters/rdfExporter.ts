@@ -22,7 +22,7 @@ export function buildStatements(relationships: Relationship[]) {
   return statements
 }
 
-export async function exportGraphJSON(dir: string, nodes: string[], relationships: Relationship[]) {
+export async function exportGraphJSON(dir: string, nodes: any[], relationships: Relationship[]) {
   await fsp.mkdir(dir, { recursive: true })
   const jsonPath = path.join(dir, `graph.json`)
   const data = {
@@ -37,7 +37,8 @@ export async function loadGraphJSON(dir: string) {
   const filePath = path.join(dir, 'graph.json')
   const raw = await fsp.readFile(filePath, 'utf8')
   const parsed = JSON.parse(raw)
-  const nodes: string[] = Array.isArray(parsed?.nodes) ? parsed.nodes.map(String) : []
+  // Nodes may be strings or objects {label,type}. Preserve original structure.
+  const nodes: any[] = Array.isArray(parsed?.nodes) ? parsed.nodes : []
   const relationships: Relationship[] = Array.isArray(parsed?.relationships)
     ? parsed.relationships
         .filter((r: any) => r && typeof r === 'object')

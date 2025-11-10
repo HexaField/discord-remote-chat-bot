@@ -102,13 +102,13 @@ app.get('/api/videos/:id/graph', (req: Request, res: Response) => {
   try {
     const raw = JSON.parse(fs.readFileSync(item.graphPath, 'utf-8'))
     // Normalize to { nodes: [{id}], links: [{source,target,label}] }
-    if (
-      Array.isArray(raw.nodes) &&
-      raw.nodes.length &&
-      typeof raw.nodes[0] === 'string' &&
-      Array.isArray(raw.relationships)
-    ) {
-      const nodes = (raw.nodes as string[]).map((n) => ({ id: n, label: n }))
+    if (Array.isArray(raw.nodes) && raw.nodes.length && Array.isArray(raw.relationships)) {
+      // nodes may be strings or objects {label,type}
+      const nodes = (raw.nodes as any[]).map((n) => {
+        if (typeof n === 'string') return { id: n, label: n }
+        const label = n?.label ?? n?.name ?? String(n)
+        return { id: label, label, type: n?.type }
+      })
       const links = (raw.relationships as any[]).map((r) => ({
         source: r.subject,
         target: r.object,
@@ -117,7 +117,11 @@ app.get('/api/videos/:id/graph', (req: Request, res: Response) => {
       return res.json({ nodes, links })
     }
     if (Array.isArray(raw.nodes) && Array.isArray(raw.links)) {
-      return res.json(raw)
+      // ensure nodes have id fields
+      const nodes = (raw.nodes as any[]).map((n) =>
+        n.id ? n : { id: n.label ?? String(n), label: n.label ?? String(n), type: n.type }
+      )
+      return res.json({ nodes, links: raw.links })
     }
     return res.json(raw)
   } catch (e) {

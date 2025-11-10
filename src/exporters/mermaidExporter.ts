@@ -72,12 +72,34 @@ function runMermaidCLI(inputPath: string, outputPath: string, args = '') {
  * @returns The Mermaid diagram definition as a string.
  */
 export function buildMermaid(
-  nodes: string[],
-  relationships: Array<{ subject: string; predicate: string; object: string }>
+  nodes: Array<string | { label?: string; type?: string }>,
+  relationships: Array<{
+    subject: string
+    predicate: string
+    object: string
+    subjectType?: string
+    objectType?: string
+  }>
 ) {
   const sanitize = sanitizeId
-  const uniqueNodes = Array.from(new Set(nodes))
-  const nodeLines = uniqueNodes.map((n) => `${sanitize(n)}["${n.replace(/\"/g, '\\"')}"]`)
+  // Normalize node labels from either string or object
+  const labels = Array.from(new Set((nodes || []).map((n) => (typeof n === 'string' ? n : n.label || String(n)))))
+  const nodeLines = labels.map((n) => `${sanitize(n)}["${n.replace(/"/g, '\"')}"]`)
+
+  // Build a node -> type map from provided node objects or relationships; default to 'other'
+  const nodeTypes: { [k: string]: string } = {}
+  for (const l of labels) nodeTypes[l] = 'other'
+  for (const n of nodes || []) {
+    if (typeof n === 'object' && n && (n.label || n.type)) {
+      const lab = String(n.label || '')
+      if (lab) nodeTypes[lab] = String(n.type || nodeTypes[lab] || 'other')
+    }
+  }
+  for (const rel of relationships || []) {
+    if (!rel || typeof rel !== 'object') continue
+    if (rel.subject && rel.subjectType) nodeTypes[rel.subject] = String(rel.subjectType)
+    if (rel.object && rel.objectType) nodeTypes[rel.object] = String(rel.objectType)
+  }
 
   const edgeLines: string[] = []
   for (const rel of relationships) {
@@ -88,7 +110,22 @@ export function buildMermaid(
     if (from && to) edgeLines.push(`${sanitize(from)} -- "${String(label).replace(/\"/g, '\\"')}" --> ${sanitize(to)}`)
   }
 
-  return ['graph TD', ...nodeLines, ...edgeLines].join('\n') + '\n'
+  // Map types to colours: drivers=green, obstacles=red, actors=amber, other=blue
+  const colours: { [k: string]: string } = {
+    driver: '#88cc88',
+    obstacle: '#ff8888',
+    actor: '#ffcc66',
+    other: '#88aaff'
+  }
+
+  const styleLines: string[] = []
+  for (const n of labels) {
+    const t = (nodeTypes[n] || 'other').toLowerCase()
+    const c = colours[t] || colours['other']
+    styleLines.push(`style ${sanitize(n)} fill:${c},stroke:#333,stroke-width:1px`)
+  }
+
+  return ['graph TD', ...nodeLines, ...edgeLines, '', ...styleLines].join('\n') + '\n'
 }
 
 /**
@@ -102,7 +139,7 @@ export function buildMermaid(
 export async function exportMermaid(
   dir: string,
   baseName: string,
-  nodes: string[],
+  nodes: Array<string | { label?: string; type?: string }>,
   relationships: Array<{ subject: string; predicate: string; object: string }>
 ) {
   await fsp.mkdir(dir, { recursive: true })
