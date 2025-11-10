@@ -230,7 +230,7 @@ app.post('/api/videos/import', upload.array('files'), async (req: Request, res: 
           fs.writeFileSync(dest, f.buffer)
           // run full pipeline using file:// URL to the saved file
           const fileUrl = `file://${dest}`
-          await audioToDiagram(fileUrl, notify, false)
+          await audioToDiagram(fileUrl, notify, true)
           results.push({ file: f.originalname, id, status: 'ok' })
         } catch (e: any) {
           console.error('[import] file failed', f.originalname, e)
@@ -251,7 +251,7 @@ app.post('/api/videos/import', upload.array('files'), async (req: Request, res: 
         .filter(Boolean)
       for (const line of lines) {
         try {
-          await audioToDiagram(line, notify, false)
+          await audioToDiagram(line, notify, true)
           results.push({ url: line, status: 'ok' })
         } catch (e: any) {
           console.error('[import] url failed', line, e)

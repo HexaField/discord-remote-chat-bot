@@ -27,6 +27,9 @@ export default function GraphView(props: {
   videoId?: string
   // callback invoked when a new graph JSON is available after regeneration
   onRegenerated?: (data: { nodes: NodeDatum[]; links: LinkDatum[] } | null) => void
+  // when true, draw colored outlines around nodes per source id using sourcePalette
+  showSourceOutlines?: boolean
+  sourcePalette?: Record<string, string>
 }): JSX.Element {
   const videoId = props.videoId
   const onRegenerated = props.onRegenerated
@@ -144,6 +147,8 @@ export default function GraphView(props: {
       .attr('height', h)
     const rootG = selection.append('g')
     const zoomG = rootG.append('g')
+    // group for per-source bubbles (Universe view) drawn behind nodes
+    const bubbleG = zoomG.append('g').attr('class', 'source-bubbles').attr('pointer-events', 'none')
 
     // Setup zoom/pan on the svg
     zoomBehavior = d3
@@ -331,6 +336,9 @@ export default function GraphView(props: {
           .attr('height', h)
           .attr('x', -w / 2)
           .attr('y', -h / 2)
+
+        // per-node outlines removed in favor of per-source bubbles rendered
+        // at the simulation tick stage
       } catch (e) {
         // if getBBox fails (rare), leave defaults
       }
@@ -436,6 +444,69 @@ export default function GraphView(props: {
         })
       // position node groups by translating the group to node x/y
       nodeG.attr('transform', (d: any) => `translate(${d.x},${d.y})`)
+
+      // update per-source bubbles (Universe view) — compute hull per source and render
+      try {
+        const snodes = sim ? (sim.nodes() as any[]) : []
+        const sourceMap = new Map<string, { id: string; points: [number, number][] }>()
+        for (const n of snodes) {
+          const srcs: string[] = Array.isArray((n as any).__sourceIds) ? (n as any).__sourceIds : []
+          if (!srcs || !srcs.length) continue
+          for (const s of srcs) {
+            if (!sourceMap.has(s)) sourceMap.set(s, { id: s, points: [] })
+            const entry = sourceMap.get(s)!
+            if (Number.isFinite(n.x) && Number.isFinite(n.y)) entry.points.push([n.x as number, n.y as number])
+          }
+        }
+
+        const sourcesArr = Array.from(sourceMap.values())
+        // bind paths
+        const pathGen = d3.line().curve(d3.curveCardinalClosed.tension(0.6))
+        const pads = 20 // padding around hull
+        const bubbles = bubbleG.selectAll('path.bubble').data(sourcesArr, (d: any) => d.id)
+        bubbles.exit().remove()
+        const be = bubbles.enter().append('path').attr('class', 'bubble').attr('pointer-events', 'none')
+        const all = be.merge(bubbles as any)
+        all.each(function (d: any) {
+          const pts = d.points || []
+          let pathStr = ''
+          if (!pts || pts.length === 0) {
+            pathStr = ''
+          } else if (pts.length === 1) {
+            const x = pts[0][0]
+            const y = pts[0][1]
+            const r = 30
+            const p = d3.path()
+            p.arc(x, y, r, 0, Math.PI * 2)
+            pathStr = p.toString()
+          } else {
+            // compute convex hull
+            const hull = d3.polygonHull(pts as [number, number][])
+            let poly: [number, number][] = hull ?? pts
+            // inflate polygon by pushing points away from centroid
+            const centroid = d3.polygonCentroid(poly)
+            const inflated = poly.map(([x, y]) => {
+              const dx = x - centroid[0]
+              const dy = y - centroid[1]
+              const len = Math.sqrt(dx * dx + dy * dy) || 1
+              const k = 1 + pads / len
+              return [centroid[0] + dx * k, centroid[1] + dy * k]
+            })
+            pathStr = pathGen(inflated as any) || ''
+          }
+          d3.select(this).attr('d', pathStr)
+        })
+
+        // style bubbles
+        all
+          .attr('fill', (d: any) => (props.sourcePalette ? props.sourcePalette[d.id] || '#999' : '#999'))
+          .attr('fill-opacity', 0.07)
+          .attr('stroke', (d: any) => (props.sourcePalette ? props.sourcePalette[d.id] || '#666' : '#666'))
+          .attr('stroke-opacity', 0.7)
+          .attr('stroke-width', 2)
+      } catch (e) {
+        // don't let bubble rendering break the whole tick
+      }
     })
 
     // background click clears selection

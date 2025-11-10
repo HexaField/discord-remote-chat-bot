@@ -1,4 +1,5 @@
 import { createEffect, createSignal, For, onCleanup, onMount, Show } from 'solid-js'
+import GraphView from './GraphView'
 import VideoCard from './VideoCard'
 
 export type VideoItem = { id: string; title?: string; thumbnail?: string }
@@ -86,6 +87,147 @@ export default function App() {
     } catch (e) {}
   })
 
+  // Universe combined graph state: when the special "UNIVERSE" list item is selected
+  const UNIVERSE_ID = 'UNIVERSE'
+  const [universeData, setUniverseData] = createSignal<{ nodes: any[]; links: any[] } | null>(null)
+  const [universeLoading, setUniverseLoading] = createSignal(false)
+
+  async function loadUniverse() {
+    setUniverseLoading(true)
+    try {
+      const items = await fetch('/api/videos').then((r) => r.json())
+      // fetch all graphs in parallel
+      const fetches = items.map(async (it: any) => {
+        try {
+          const r = await fetch(`/api/videos/${it.id}/graph`)
+          if (!r.ok) return null
+          const g = await r.json()
+          return { id: it.id, graph: g }
+        } catch (e) {
+          return null
+        }
+      })
+      const results = await Promise.all(fetches)
+
+      // Deduplicate nodes by label+type and deduplicate identical links
+      const nodeKeyToNode = new Map<string, any>() // key -> node obj
+      const usedIds = new Set<string>()
+      const linksOut: any[] = []
+      const linkKeys = new Set<string>()
+
+      for (const res of results) {
+        if (!res || !res.graph) continue
+        const vid = res.id
+        const g = res.graph
+
+        // map original id -> unified id for this graph
+        const originalToUnified = new Map<string, string>()
+
+        // process nodes
+        for (const n of g.nodes || []) {
+          // support string nodes or object nodes
+          const label = (typeof n === 'string' ? n : (n.label ?? n.id ?? String(n))) || ''
+          const type = (typeof n === 'object' && n ? n.type : undefined) || ''
+          const key = `${label}::${type}`
+          if (nodeKeyToNode.has(key)) {
+            const existing = nodeKeyToNode.get(key)
+            // record source id set
+            if (!existing.__sourceIds) existing.__sourceIds = []
+            if (!existing.__sourceIds.includes(vid)) existing.__sourceIds.push(vid)
+            // map original id to existing unified id
+            const unifiedId = existing.id
+            if (typeof n === 'object' && n && n.id) originalToUnified.set(n.id, unifiedId)
+          } else {
+            // generate a safe id from label
+            const base =
+              String(label || 'node')
+                .replace(/[^a-zA-Z0-9-_]/g, '-')
+                .slice(0, 60) || `node-${Date.now()}`
+            let uid = base
+            let suffix = 1
+            while (usedIds.has(uid)) {
+              uid = `${base}-${suffix++}`
+            }
+            usedIds.add(uid)
+            const nodeObj: any = { id: uid, label, type: type || undefined, __sourceIds: [vid] }
+            nodeKeyToNode.set(key, nodeObj)
+            if (typeof n === 'object' && n && n.id) originalToUnified.set(n.id, uid)
+          }
+        }
+
+        // process links, mapping to unified ids
+        for (const l of g.links || []) {
+          const srcOrig = l.source
+          const tgtOrig = l.target
+          // try to resolve original ids to unified ids
+          const srcUnified =
+            originalToUnified.get(srcOrig) ??
+            (() => {
+              // fallback: try to resolve by label on the global map
+              const srcLabel = (g.nodes || []).find(
+                (nn: any) => (nn as any).id === srcOrig || (nn as any).label === srcOrig
+              )
+              if (srcLabel) {
+                const lbl = srcLabel.label ?? srcLabel.id
+                const t = srcLabel.type ?? ''
+                const k = `${lbl}::${t}`
+                return nodeKeyToNode.get(k)?.id
+              }
+              return undefined
+            })()
+          const tgtUnified =
+            originalToUnified.get(tgtOrig) ??
+            (() => {
+              const tgtLabel = (g.nodes || []).find(
+                (nn: any) => (nn as any).id === tgtOrig || (nn as any).label === tgtOrig
+              )
+              if (tgtLabel) {
+                const lbl = tgtLabel.label ?? tgtLabel.id
+                const t = tgtLabel.type ?? ''
+                const k = `${lbl}::${t}`
+                return nodeKeyToNode.get(k)?.id
+              }
+              return undefined
+            })()
+          if (!srcUnified || !tgtUnified) continue
+          const linkKey = `${srcUnified}::${tgtUnified}::${String(l.label || '')}`
+          if (linkKeys.has(linkKey)) continue
+          linkKeys.add(linkKey)
+          linksOut.push({ source: srcUnified, target: tgtUnified, label: l.label })
+        }
+      }
+
+      const nodesOut = Array.from(nodeKeyToNode.values())
+      setUniverseData({ nodes: nodesOut, links: linksOut })
+    } finally {
+      setUniverseLoading(false)
+    }
+  }
+
+  // build a simple color palette map for source videos (used only by Universe view)
+  function buildSourcePalette() {
+    const cols = [
+      '#e6194b',
+      '#3cb44b',
+      '#ffe119',
+      '#4363d8',
+      '#f58231',
+      '#911eb4',
+      '#46f0f0',
+      '#f032e6',
+      '#bcf60c',
+      '#fabebe',
+      '#008080',
+      '#e6beff',
+      '#9a6324',
+      '#fffac8'
+    ]
+    const map: Record<string, string> = {}
+    const items = videos()
+    for (let i = 0; i < items.length; i++) map[items[i].id] = cols[i % cols.length]
+    return map
+  }
+
   // read video from search params on mount and handle popstate
   onMount(() => {
     const params = new URLSearchParams(window.location.search)
@@ -110,6 +252,16 @@ export default function App() {
     const q = params.toString()
     const url = window.location.pathname + (q ? `?${q}` : '')
     history.replaceState(null, '', url)
+  })
+
+  // when Universe is selected, load/refresh the combined graph
+  createEffect(() => {
+    if (selected() === UNIVERSE_ID) {
+      loadUniverse()
+    } else {
+      // clear cached universe data when leaving view
+      setUniverseData(null)
+    }
   })
 
   return (
@@ -200,6 +352,19 @@ export default function App() {
           </div>
 
           <div class="flex-1 overflow-auto">
+            {/* Universe combined graph entry at top of the list */}
+            <button
+              class={`w-full text-left p-3 hover:bg-gray-50 flex items-center gap-2 ${selected() === UNIVERSE_ID ? 'bg-gray-100' : ''}`}
+              onClick={() => setSelected((p) => (p === UNIVERSE_ID ? null : UNIVERSE_ID))}
+            >
+              <div class="w-8 h-8 bg-gray-200 rounded overflow-hidden flex items-center justify-center">🌐</div>
+              {!collapsed() && (
+                <div class="truncate">
+                  <div class="font-semibold truncate">Universe</div>
+                  <div class="text-xs text-gray-500 truncate">All videos combined</div>
+                </div>
+              )}
+            </button>
             <For each={videos()}>
               {(v) => (
                 <button
@@ -258,7 +423,16 @@ export default function App() {
               fallback={<div class="text-gray-500">Select a video from the left to view details.</div>}
             >
               <div class="h-full">
-                <VideoCard id={selected()!} />
+                {selected() === UNIVERSE_ID ? (
+                  <div class="h-full">
+                    <h2 class="font-semibold mb-2">Universe Graph</h2>
+                    <div class="h-full border rounded bg-white">
+                      <GraphView data={universeData()} showSourceOutlines={true} sourcePalette={buildSourcePalette()} />
+                    </div>
+                  </div>
+                ) : (
+                  <VideoCard id={selected()!} />
+                )}
               </div>
             </Show>
           </div>
