@@ -174,6 +174,8 @@ ${table}`
       return chat.editReply('Please provide an audio file attachment or a URL link to an audio file.')
     }
 
+    const force = false //chat.toString().toLowerCase().includes('--force')
+
     try {
       const onProgress = async (message: string) => {
         try {
@@ -183,7 +185,7 @@ ${table}`
         }
       }
 
-      const { kumuPath, pngPath } = await audioToDiagram(url, onProgress)
+      const { kumuPath, pngPath } = await audioToDiagram(url, onProgress, force)
       const diagramData = await fs.readFile(kumuPath, 'utf-8')
       const pngData = await fs.readFile(pngPath)
       return chat.editReply({

@@ -1,6 +1,6 @@
 import fs from 'fs'
 import { callLLM, getEmbedding } from './llm'
-import { debug, warn } from './logger'
+import { debug } from './logger'
 
 export type RelationshipEntry = {
   subject: string
@@ -47,7 +47,7 @@ export type ProvenanceEntry = {
 }
 
 const systemPrompt = `You are a System Dynamics Professional Modeler.
-Users will give text, and it is your job to generate causal relationships from that text.
+Users will give text, and it is your job to generate causal relationships from that text that can be used to build a causal loop diagram. This means most if not all should be connected into a single graph, including closed loops where they exist.
 You will conduct a multistep process:
 
 1. Identify all words that imply cause and effect between two entities in the text. These entities are variables.
@@ -84,10 +84,10 @@ export async function generateCausalRelationships(
   // Generate a short topic summary: ask the LLM to produce a few short sentences about
   // the overall topic of the provided transcript. We join those sentences into a
   // single topic string which will be used to classify sentence relevance below.
+  const joined = sentences.join('').split('.').join('.\n')
   let topicSummary = ''
   try {
     const topicSystem = `You are a helpful assistant. Given a transcript, generate 2-4 short sentences that describe the main topic(s) covered. Return only the sentences, each on its own line.`
-    const joined = sentences.join('\n')
     const topicResp = await callLLM(topicSystem, joined, 'ollama', mediumLLMModel)
     if (topicResp && topicResp.success && topicResp.data) {
       // convert to string and split into sentences, then join into single-line summary
@@ -103,72 +103,72 @@ export async function generateCausalRelationships(
     topicSummary = ''
   }
 
-  const embeddings = await initEmbeddings(sentences, embeddingModel)
+  const filteredSentences: string[] = sentences
+
+  // for (let i = 0; i < sentences.length; i++) {
+  //   onProgress(`Generating Causal Relationships: Pre-processing sentence ${i + 1} of ${sentences.length}...`)
+  //   const sentence = sentences[i]
+  //   const sec = sentence.trim()
+  //   if (!sec) continue
+  //   // If we have a topic summary, classify this sentence as relevant or irrelevant
+  //   // to the topic. The classifier is constrained to answer only 'yes' or 'no'.
+  //   if (topicSummary) {
+  //     try {
+  //       const clsSystem = `You are a classification assistant. Here is a short topic summary:\n${topicSummary}\n\nFor the given sentence, answer ONLY 'yes' or 'no' (lowercase) indicating whether the sentence is relevant to the topic summary and contains causal relationships that should be extracted to be part of a causal loop diagram.`
+  //       const clsResp = await callLLM(clsSystem, sec, 'ollama', fastLLMModel)
+  //       if (clsResp && clsResp.success && clsResp.data) {
+  //         const ans = String(clsResp.data).trim().toLowerCase()
+  //         // Accept responses that start with yes/no
+  //         const first = (ans.match(/^(yes|no)/) || [])[0]
+  //         if (first === 'no') {
+  //           // skip irrelevant sentence
+  //           debug(`Skipping sentence ${i + 1} as irrelevant to topic`)
+  //           continue
+  //         }
+  //         filteredSentences.push(sec)
+  //       }
+  //     } catch (e) {
+  //       debug('Classification failed, proceeding with sentence:', e)
+  //     }
+  //   }
+  // }
+
+  const embeddings = await initEmbeddings(filteredSentences, embeddingModel)
 
   let globalIndex = 1
   const aggregated: { [k: string]: any } = {}
   let anyFound = false
 
-  for (let i = 0; i < sentences.length; i++) {
-    const sentence = sentences[i]
-    const sec = sentence.trim()
-    if (!sec) continue
-    // If we have a topic summary, classify this sentence as relevant or irrelevant
-    // to the topic. The classifier is constrained to answer only 'yes' or 'no'.
-    if (topicSummary) {
-      try {
-        const clsSystem = `You are a classification assistant. Here is a short topic summary:\n${topicSummary}\n\nFor the given sentence, answer ONLY 'yes' or 'no' (lowercase) indicating whether the sentence is relevant to the topic summary, and contains any causal relationships that should be extracted to be part of a causal loop diagram.`
-        const clsResp = await callLLM(clsSystem, sec, 'ollama', fastLLMModel)
-        if (clsResp && clsResp.success && clsResp.data) {
-          const ans = String(clsResp.data).trim().toLowerCase()
-          // Accept responses that start with yes/no
-          const first = (ans.match(/^(yes|no)/) || [])[0]
-          if (first === 'no') {
-            // skip irrelevant sentence
-            debug(`Skipping sentence ${i + 1} as irrelevant to topic`)
-            continue
-          }
-          // If it's 'yes' we proceed. If uncertain, we proceed as a conservative default.
-        }
-      } catch (e) {
-        debug('Classification failed, proceeding with sentence:', e)
-      }
-    }
-    // Step 1 (per section)
-    const resp1 = await callLLM(systemPrompt, sec, 'ollama', mediumLLMModel)
-    if (!resp1.success || !resp1.data) {
-      warn('LLM failed to produce initial response for a section')
-      continue
-    }
-    const response1 = loadJson(resp1.data)
-    // If empty, skip this section silently
-    if (!response1 || Object.keys(response1).length === 0) {
-      debug('No causal relationships in section')
-      continue
-    }
-    anyFound = true
+  const filteredJoined = filteredSentences.join('\n')
 
-    // Step 2 (per section) - loop closure specific to this section.
-    // const loopQuery = `Find out if there are any possibilities of forming closed loops that are implied in the text. If yes, then close the loops by adding the extra relationships and provide them in a JSON format please.`
-    // const resp2 = await callLLM(systemPrompt, loopQuery, 'ollama', 'llama3.1:8b')
-    // const response2 = resp2.success && resp2.data ? loadJson(resp2.data) : null
-
-    const response2 = response1
-
-    const mergedSection: any =
-      response2 && Object.keys(response2).length > 0 ? { ...response1, ...response2 } : response1
-
-    // Reindex merged section entries into aggregated dict.
-    const keys = Object.keys(mergedSection)
-    for (const k of keys) {
-      const entry = mergedSection[k]
-      aggregated[String(globalIndex++)] = entry
-    }
-
-    onProgress(`Generating Causal Relationships: Processed ${i + 1} of ${sentences.length} sections`)
+  // Step 1 (per section)
+  const resp1 = await callLLM(systemPrompt, filteredJoined, 'opencode', 'github-copilot/gpt-5-mini')
+  if (!resp1.success || !resp1.data) {
+    throw new Error('Failed to call LLM for causal relationship extraction')
+  }
+  const response1 = loadJson(resp1.data)
+  // If empty, skip this section silently
+  if (!response1 || Object.keys(response1).length === 0) {
+    throw new Error('Failed to extract any causal relationships from input text')
   }
 
-  if (!anyFound) throw new Error('Input text did not have any causal relationships across all sections!')
+  // Step 2 (per section) - loop closure specific to this section.
+  // const loopQuery = `Find out if there are any possibilities of forming closed loops that are implied in the text. If yes, then close the loops by adding the extra relationships and provide them in a JSON format please.`
+  // const resp2 = await callLLM(systemPrompt, loopQuery, 'ollama', 'llama3.1:8b')
+  // const response2 = resp2.success && resp2.data ? loadJson(resp2.data) : null
+
+  const response2 = response1
+
+  const mergedSection: any = response2 && Object.keys(response2).length > 0 ? { ...response1, ...response2 } : response1
+
+  // Reindex merged section entries into aggregated dict.
+  const keys = Object.keys(mergedSection)
+  for (const k of keys) {
+    const entry = mergedSection[k]
+    aggregated[String(globalIndex++)] = entry
+  }
+
+  // onProgress(`Generating Causal Relationships: Processed ${i + 1} of ${filteredSentences.length} sections`)
 
   const responseDict: {
     [k: string]: {
@@ -195,7 +195,9 @@ export async function generateCausalRelationships(
       continue
     }
 
-    const relevantTextLine = relevant ? await getLine(embeddings, embeddingModel, sentences, String(relevant)) : ''
+    const relevantTextLine = relevant
+      ? await getLine(embeddings, embeddingModel, filteredSentences, String(relevant))
+      : ''
     entries.push({
       subject: String(subject).toLowerCase(),
       object: String(object).toLowerCase(),
@@ -212,10 +214,10 @@ export async function generateCausalRelationships(
   const checked = await checkVariables(
     embeddings,
     embeddingModel,
-    sentences,
+    filteredSentences,
     threshold,
     llmModel,
-    sentences.join('\n'),
+    filteredSentences.join('\n'),
     entries
   )
 
@@ -311,7 +313,7 @@ Return ONLY a single JSON object mapping the variable name to one of the strings
     const promptBody = nodeList.join('\n') + '\n\nContext:\n' + (textContext || '')
     try {
       onProgress(`Classifying ${nodeList.length} nodes...`)
-      const resp = await callLLM(sys, promptBody, 'ollama', llmModelLocal)
+      const resp = await callLLM(sys, promptBody, 'opencode', 'github-copilot/gpt-5-mini')
       if (resp && resp.success && resp.data) {
         const parsed = loadJson(String(resp.data))
         if (parsed && typeof parsed === 'object') {
@@ -338,7 +340,7 @@ Return ONLY a single JSON object mapping the variable name to one of the strings
     return out
   }
 
-  const nodeTypes = await classifyNodes(nodes, sentences.join('\n'))
+  const nodeTypes = await classifyNodes(nodes, filteredSentences.join('\n'))
 
   // Convert nodes to objects with types
   const nodesWithTypes: Node[] = nodes.map((n) => ({ label: n, type: nodeTypes[n] || 'other' }))
@@ -379,7 +381,7 @@ async function getLine(embeddings: number[][], embeddingModel: string, sentences
   return sentences[idx]
 }
 
-async function checkCausalRelationships(entry: RelationshipEntry, llmModel = 'llama3.1:8b') {
+async function checkCausalRelationships(entry: RelationshipEntry, retry = 0) {
   const var1 = entry.subject
   const var2 = entry.object
   const prompt = `Relationship: ${var1} -> ${var2}\nRelevant Text: ${entry.relevant}\nReasoning: ${entry.reasoning}\n\nGiven the above text, select which of the following options are correct (there may be more than one):\n1. increasing ${var1} increases ${var2}\n2. decreasing ${var1} decreases ${var2}\n3. increasing ${var1} decreases ${var2}\n4. decreasing ${var1} increases ${var2}\n\nRespond in JSON with keys 'answers' (a list of numbers) and 'reasoning'.`
@@ -412,9 +414,11 @@ async function checkCausalRelationships(entry: RelationshipEntry, llmModel = 'll
   } else if (steps.includes('3') || steps.includes('4')) {
     predicate = 'negative'
   } else {
-    throw new Error(
-      'Unexpected answer while verifying causal relationship' + JSON.stringify(parsed) + JSON.stringify(steps)
-    )
+    if (retry < 3) {
+      return await checkCausalRelationships(entry, retry + 1)
+    } else {
+      throw new Error('Could not determine relationship polarity after multiple attempts')
+    }
   }
 
   const verificationReasoning = parsed && parsed.reasoning ? String(parsed.reasoning) : ''
@@ -499,7 +503,7 @@ async function checkVariables(
   const prompt = `You will receive a list of relationship objects and groups of similar variables to merge.\nRelationships:\n${JSON.stringify(
     entries
   )}\nSimilar Variables (pairs/groups to merge):\n${JSON.stringify(similar_variables)}\nPlease return a single JSON object mapping ordinal keys (\"1\", \"2\", ...) to entries with subject/predicate/object/reasoning/relevant text.`
-  const resp = await callLLM(mergeSystem, prompt, 'ollama', mediumLLMModel)
+  const resp = await callLLM(mergeSystem, prompt, 'opencode', 'github-copilot/gpt-5-mini')
   if (!resp.success || !resp.data) throw new Error('LLM failed while merging similar variables')
   const parsed = loadJson(resp.data)
   if (!parsed) throw new Error('Got no corrected response from the assistant')

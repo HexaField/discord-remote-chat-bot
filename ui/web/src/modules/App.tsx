@@ -78,10 +78,10 @@ export default function App() {
   // read video from search params on mount and handle popstate
   onMount(() => {
     const params = new URLSearchParams(window.location.search)
-    const v = params.get('video')
+    const v = params.get('v')
     if (v) setSelected(v)
     const onPop = () => {
-      const p = new URLSearchParams(window.location.search).get('video')
+      const p = new URLSearchParams(window.location.search).get('v')
       setSelected(p)
     }
     window.addEventListener('popstate', onPop)
@@ -92,10 +92,10 @@ export default function App() {
   createEffect(() => {
     const v = selected()
     const params = new URLSearchParams(window.location.search)
-    const cur = params.get('video')
+    const cur = params.get('v')
     if (v === cur) return
-    if (v) params.set('video', v)
-    else params.delete('video')
+    if (v) params.set('v', v)
+    else params.delete('v')
     const q = params.toString()
     const url = window.location.pathname + (q ? `?${q}` : '')
     history.replaceState(null, '', url)

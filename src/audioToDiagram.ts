@@ -302,7 +302,11 @@ function normalizeTranscript(text: string) {
   return text.replace(/\r/g, '').replace(/\n+/g, ' ').replace(/\s+/g, ' ').trim()
 }
 
-export default async function audioToDiagram(audioURL: string, onProgress?: (message: string) => void | Promise<void>) {
+export default async function audioToDiagram(
+  audioURL: string,
+  onProgress?: (message: string) => void | Promise<void>,
+  force = false
+) {
   await fsp.mkdir(TMP_DIR, { recursive: true })
 
   // Ensure tools
@@ -413,7 +417,7 @@ export default async function audioToDiagram(audioURL: string, onProgress?: (mes
   let relationships: Relationship[] = []
   let statements: string[] = []
   let loadedFromGraph = false
-  if (await existsNonEmpty(graphJSONPath)) {
+  if ((await existsNonEmpty(graphJSONPath)) && !force) {
     try {
       await notify('Loading existing graph data…')
       const parsed = await loadGraphJSON(sourceDir)
@@ -506,7 +510,7 @@ export default async function audioToDiagram(audioURL: string, onProgress?: (mes
 
   // Export graph JSON if missing or empty
   try {
-    const needGraph = !(await existsNonEmpty(graphJSONPath))
+    const needGraph = !((await existsNonEmpty(graphJSONPath)) && !force)
     if (needGraph) {
       info('Writing graph JSON for', baseName)
       await notify('Writing graph data…')
@@ -543,7 +547,7 @@ export default async function audioToDiagram(audioURL: string, onProgress?: (mes
       const needMDD = !(await existsNonEmpty(mermaidMDD))
       const needSVG = !(await existsNonEmpty(mermaidSVG))
       const needPNG = !(await existsNonEmpty(mermaidPNG))
-      if (needMDD || needSVG || needPNG) {
+      if (needMDD || needSVG || needPNG || force) {
         info('Writing mermaid artifacts for', baseName)
         await notify('Rendering diagram (Mermaid)…')
         await exportMermaid(sourceDir, 'mermaid', nodes, relationships)
