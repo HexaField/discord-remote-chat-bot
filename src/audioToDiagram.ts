@@ -4,6 +4,9 @@ import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { generateCausalRelationships } from './cld'
+// Causal pipeline (deterministic alternative)
+import { runCausalPipeline } from './causal/pipeline'
+import type { Code } from './causal/types'
 import { exportGraphViz } from './exporters/graphVizExporter'
 import exportMermaid from './exporters/mermaidExporter'
 import { exportRDF, parseTTL } from './exporters/rdfExporter'
@@ -335,9 +338,12 @@ export default async function audioToDiagram(audioURL: string) {
 
   // Generate nodes and relationships. If a TTL exists, parse it and use that as the source of truth.
 
-  let nodes: string[]
-  let relationships: Relationship[]
+  let nodes: string[] = []
+  let relationships: Relationship[] = []
   let statements: string[] = []
+  console.log(process.env.USE_CAUSAL_PIPELINE)
+  const useCausalPipeline = process.env.USE_CAUSAL_PIPELINE === 'true'
+  let loadedFromTTL = false
   if (await existsNonEmpty(ttlPath)) {
     try {
       const ttl = await fsp.readFile(ttlPath, 'utf8')
@@ -345,12 +351,39 @@ export default async function audioToDiagram(audioURL: string) {
       nodes = parsed.nodes
       relationships = parsed.relationships
       statements = parsed.statements
+      loadedFromTTL = true
       debug('Loaded nodes and relationships from TTL', ttlPath)
     } catch (e) {
-      debug('Failed to parse TTL, regenerating nodes/relationships', e)
-      const useSDB = true // Boolean(process.env.USE_SYSTEM_DYNAMICS_TS)
-      // if (useSDB) {
-      // try {
+      console.warn('Failed to parse existing TTL, regenerating nodes and relationships:', e)
+    }
+  }
+  if (!loadedFromTTL) {
+    // const useSDB = true //Boolean(process.env.USE_SYSTEM_DYNAMICS_TS)
+    // if (useSDB) {
+    //   try {
+    if (useCausalPipeline) {
+      const artifacts = await runCausalPipeline(
+        [{ id: baseName, text: transcript, title: baseName, sourceUri: audioURL }],
+        { exportDir: TMP_DIR, baseName: `${baseName}.causal` }
+      )
+      if (!artifacts.edges.length) throw new Error('Causal pipeline produced no edges')
+      const variableById = new Map<string, Code>(artifacts.graph.variables.map((v) => [v.id, v]))
+      nodes = artifacts.graph.variables.map((v) => v.label)
+      relationships = artifacts.edges.map((edge) => {
+        const from = variableById.get(edge.fromVariableId)?.label || edge.fromVariableId
+        const to = variableById.get(edge.toVariableId)?.label || edge.toVariableId
+        return {
+          subject: from,
+          predicate: edge.polarity === '+' ? 'reinforces' : 'reduces',
+          object: to
+        }
+      })
+      statements = artifacts.edges.map((e) => {
+        const from = variableById.get(e.fromVariableId)?.label || e.fromVariableId
+        const to = variableById.get(e.toVariableId)?.label || e.toVariableId
+        return `${from} -> ${to} ${e.polarity}`
+      })
+    } else {
       const cld = await generateCausalRelationships(
         transcript,
         0.85,
@@ -364,36 +397,7 @@ export default async function audioToDiagram(audioURL: string) {
       nodes = cld.nodes
       relationships = cld.relationships
       statements = cld.statements
-      // } catch (err) {
-      //   console.warn(
-      //     'System-Dynamics-Bot failed; falling back to LLM-based extraction:',
-      //     (err as any)?.message || err
-      //   )
-      //   nodes = await generateNodes(transcript)
-      //   relationships = await generateRelationships(transcript, nodes)
-      // }
-      // } else {
-      //   nodes = await generateNodes(transcript)
-      //   relationships = await generateRelationships(transcript, nodes)
-      // }
     }
-  } else {
-    // const useSDB = true //Boolean(process.env.USE_SYSTEM_DYNAMICS_TS)
-    // if (useSDB) {
-    //   try {
-    const cld = await generateCausalRelationships(
-      transcript,
-      0.85,
-      true,
-      process.env.SDB_LLM_MODEL,
-      process.env.SDB_EMBEDDING_MODEL
-    )
-    if (cld.nodes.length === 0 || cld.relationships.length === 0) {
-      throw new Error('Failed to extract any nodes or relationships')
-    }
-    nodes = cld.nodes
-    relationships = cld.relationships
-    statements = cld.statements
     //   } catch (err) {
     //     console.warn('System-Dynamics-Bot failed; falling back to LLM-based extraction:', (err as any)?.message || err)
     //     nodes = await generateNodes(transcript)

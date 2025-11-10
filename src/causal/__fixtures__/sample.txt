@@ -1,0 +1,4 @@
+Underperformance triggers resource allocation. When there is underperformance, teams dedicate more resources.
+Underperformance also triggers scrapping in severe cases; scrapping lowers resource allocation but may reset performance.
+Low performance leads to rework; rework can improve design quality over time. Better design increases performance.
+Improved performance reduces underperformance.
