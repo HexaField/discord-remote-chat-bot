@@ -2,6 +2,27 @@ import fs from 'fs'
 import { callLLM, getEmbedding } from './llm'
 import { debug, warn } from './logger'
 
+export type RelationshipEntry = {
+  subject: string
+  object: string
+  predicateRaw: string
+  reasoning: string
+  relevant: string
+  createdAt: string
+  sourceSentenceIndex?: number
+}
+
+export type VerifiedRelationship = {
+  subject: string
+  object: string
+  predicate: string // 'positive' | 'negative'
+  reasoning: string
+  relevant: string
+  createdAt: string
+  verifiedAt: string
+  provenance?: any
+}
+
 function simpleSentenceSplit(text: string): string[] {
   // very simple sentence splitter
   return text
@@ -42,7 +63,7 @@ export async function generateCausalRelationships(
   onProgress: (msg: string) => void,
   threshold = 0.85,
   verbose = false,
-  llmModel = 'github-copilot/gpt-5-mini',
+  llmModel = 'llama3.1:8b',
   embeddingModel = 'bge-m3:latest'
 ) {
   // Generate a short topic summary: ask the LLM to produce a few short sentences about
@@ -52,7 +73,7 @@ export async function generateCausalRelationships(
   try {
     const topicSystem = `You are a helpful assistant. Given a transcript, generate 2-4 short sentences that describe the main topic(s) covered. Return only the sentences, each on its own line.`
     const joined = sentences.join('\n')
-    const topicResp = await callLLM(topicSystem, joined, 'ollama', llmModel)
+    const topicResp = await callLLM(topicSystem, joined, 'ollama', 'llama3.1:8b')
     if (topicResp && topicResp.success && topicResp.data) {
       // convert to string and split into sentences, then join into single-line summary
       const raw = String(topicResp.data)
@@ -144,10 +165,8 @@ export async function generateCausalRelationships(
     }
   } = aggregated
 
-  // Build temporary relationship lines from structured S/P/O entries so we can reuse
-  // the existing embedding-driven merging and verification pipeline.
-  // lines: [relationshipString, reasoning, relevantLine]
-  const lines: Array<[string, string, string]> = []
+  // Build temporary structured relationship objects (preserve provenance)
+  const entries: RelationshipEntry[] = []
   for (const k of Object.keys(responseDict)) {
     const entry = responseDict[k]
     const subject = entry.subject
@@ -161,13 +180,18 @@ export async function generateCausalRelationships(
       continue
     }
 
-    const pol = predicateRaw.toLowerCase().includes('pos') ? '(+)' : '(-)'
-    const relationship = `${subject} --> ${pol} ${object}`
     const relevantTextLine = relevant ? await getLine(embeddings, embeddingModel, sentences, String(relevant)) : ''
-    lines.push([relationship.toLowerCase(), String(reasoning || ''), String(relevantTextLine || '')])
+    entries.push({
+      subject: String(subject).toLowerCase(),
+      object: String(object).toLowerCase(),
+      predicateRaw: String(predicateRaw),
+      reasoning: String(reasoning || ''),
+      relevant: String(relevantTextLine || ''),
+      createdAt: new Date().toISOString()
+    })
   }
 
-  onProgress(`Generating Causal Relationships: Checking ${lines.length} relationships...`)
+  onProgress(`Generating Causal Relationships: Checking ${entries.length} relationships...`)
 
   // Step 3: check and merge similar variables via LLM-driven logic (reuses existing helper)
   const checked = await checkVariables(
@@ -177,81 +201,66 @@ export async function generateCausalRelationships(
     threshold,
     llmModel,
     sentences.join('\n'),
-    lines
+    entries
   )
 
-  console.log('Checked from', lines.length, 'to', checked.length, 'relationships')
+  console.log('Checked from', entries.length, 'to', checked.length, 'relationships')
 
-  // Step 4: verify each relationship and produce final corrected lines (1-based numbering)
-  const corrected: string[] = []
+  // Step 4: verify each relationship and produce final corrected structured entries
+  const verifiedEntries: Array<{
+    subject: string
+    object: string
+    predicate: string
+    reasoning: string
+    relevant: string
+    createdAt: string
+    verifiedAt: string
+    provenance?: any
+  }> = []
+
   for (let i = 0; i < checked.length; i++) {
     const vals = checked[i]
-    const relevantTxt = vals[2]
-    const verified = await checkCausalRelationships(vals[0], vals[1], relevantTxt)
-    corrected.push(`${i + 1}. ${verified}`)
+    const verified = await checkCausalRelationships(vals)
+    verifiedEntries.push(verified)
   }
 
-  console.log('Corrected from', checked.length, 'to', corrected.length, 'relationships')
+  console.log('Verified from', checked.length, 'to', verifiedEntries.length, 'relationships')
 
-  onProgress(`Generating Causal Relationships: Formatting ${corrected.length} relationships...`)
+  onProgress(`Generating Causal Relationships: Formatting ${verifiedEntries.length} relationships...`)
 
-  // dedupe and normalize lines
-  const correctedLines = corrected.map((l) => l.replace(/^[0-9]+\.\s*/, '').trim()).filter(Boolean)
-  const uniq = Array.from(new Set(correctedLines))
-
-  function normalizeLine(line: string): string | null {
-    let s = line.trim()
-    if (!s.includes('-->')) return null
-    const parts = s.split('-->')
-    let left = parts[0].trim()
-    let right = parts.slice(1).join('-->').trim()
-
-    // detect existing symbol
-    const symbolMatch = right.match(/\(\+\)|\(\-\)/)
-    let symbol = symbolMatch ? symbolMatch[0] : ''
-    // remove any existing symbol from right
-    right = right.replace(/\(\+\)|\(\-\)/g, '').trim()
-
-    left = left
-      .replace(/["'()\.,]/g, '')
-      .replace(/\s+/g, ' ')
-      .trim()
-    right = right
-      .replace(/["'()\.,]/g, '')
-      .replace(/\s+/g, ' ')
-      .trim()
-
-    if (!left || !right) return null
-    return `${left} --> ${symbol} ${right}`
+  // Deduplicate normalized relationships by subject|predicate|object
+  const uniqMap = new Map<string, (typeof verifiedEntries)[0]>()
+  for (const e of verifiedEntries) {
+    const key = `${e.subject}||${e.predicate}||${e.object}`
+    if (!uniqMap.has(key)) {
+      e.provenance = e.provenance || []
+      uniqMap.set(key, e)
+    } else {
+      // merge provenance/reasoning: keep earliest createdAt and concatenate reasoning
+      const existing = uniqMap.get(key)!
+      if (e.createdAt < existing.createdAt) existing.createdAt = e.createdAt
+      existing.reasoning = `${existing.reasoning}${existing.reasoning && e.reasoning ? ' | ' : ''}${e.reasoning}`
+      existing.provenance = existing.provenance || []
+      existing.provenance.push(e.provenance || { verifiedAt: e.verifiedAt })
+    }
   }
-
-  const normalized: string[] = []
-  for (const l of uniq) {
-    const n = normalizeLine(l)
-    if (n) normalized.push(n)
-  }
-  // Deduplicate normalized relationships
-  const uniqNormalized = Array.from(new Set(normalized))
 
   const nodes = [] as string[]
-  const relationships = [] as { subject: string; predicate: string; object: string }[]
+  const relationships = [] as Array<{
+    subject: string
+    predicate: string
+    object: string
+    reasoning: string
+    relevant: string
+    createdAt: string
+    verifiedAt: string
+    provenance?: any
+  }>
 
-  for (const rel of uniqNormalized) {
-    const arrowStart = rel.indexOf('-->')
-    if (arrowStart === -1) continue
-    const subject = rel.slice(0, arrowStart).trim()
-    // capture polarity token with required space pattern
-    const polarityMatch = rel.match(/-->\s*(\(\+\)|\(\-\))/)
-    const polarity = polarityMatch ? polarityMatch[1] : ''
-    const objectPart = rel
-      .slice(arrowStart + 3)
-      .replace(/\s*(\(\+\)|\(\-\))/, '')
-      .trim()
-    if (!subject || !objectPart) continue
-    const predicate = polarity === '(+)' ? 'positive' : 'negative'
-    relationships.push({ subject, predicate, object: objectPart })
-    if (!nodes.includes(subject)) nodes.push(subject)
-    if (!nodes.includes(objectPart)) nodes.push(objectPart)
+  for (const e of uniqMap.values()) {
+    if (!nodes.includes(e.subject)) nodes.push(e.subject)
+    if (!nodes.includes(e.object)) nodes.push(e.object)
+    relationships.push(e)
   }
 
   return { nodes, relationships }
@@ -284,16 +293,12 @@ async function getLine(embeddings: number[][], embeddingModel: string, sentences
   return sentences[idx]
 }
 
-async function checkCausalRelationships(
-  relationship: string,
-  reasoning: string,
-  relevant_txt: string,
-  llmModel?: string
-) {
-  const [var1, var2] = extractVariables(relationship)
-  const prompt = `Relationship: ${relationship}\nRelevant Text: ${relevant_txt}\nReasoning: ${reasoning}\n\nGiven the above text, select which of the following options are correct (there may be more than one):\n1. increasing ${var1} increases ${var2}\n2. decreasing ${var1} decreases ${var2}\n3. increasing ${var1} decreases ${var2}\n4. decreasing ${var1} increases ${var2}\n\nRespond in JSON with keys 'answers' (a list of numbers) and 'reasoning'.`
+async function checkCausalRelationships(entry: RelationshipEntry, llmModel = 'llama3.1:8b') {
+  const var1 = entry.subject
+  const var2 = entry.object
+  const prompt = `Relationship: ${var1} -> ${var2}\nRelevant Text: ${entry.relevant}\nReasoning: ${entry.reasoning}\n\nGiven the above text, select which of the following options are correct (there may be more than one):\n1. increasing ${var1} increases ${var2}\n2. decreasing ${var1} decreases ${var2}\n3. increasing ${var1} decreases ${var2}\n4. decreasing ${var1} increases ${var2}\n\nRespond in JSON with keys 'answers' (a list of numbers) and 'reasoning'.`
 
-  const resp = await callLLM(prompt, '', 'ollama', 'llama3.1:8b')
+  const resp = await callLLM(prompt, '', 'ollama', llmModel)
   if (!resp.success || !resp.data) {
     throw new Error('LLM failed while checking causal relationship')
   }
@@ -301,7 +306,6 @@ async function checkCausalRelationships(
   let steps: string[] = []
   if (parsed && parsed.answers) {
     try {
-      // answers could be a string like "[1,2]" or an array
       if (Array.isArray(parsed.answers)) {
         steps = parsed.answers.map(String)
       } else if (typeof parsed.answers === 'string') {
@@ -311,19 +315,33 @@ async function checkCausalRelationships(
       steps = []
     }
   }
-  // fallback: try to extract digits from raw data
   if (steps.length === 0) {
-    const nums = (resp.data || '').match(/\d+/g) || []
+    const nums = (String(resp.data) || '').match(/\d+/g) || []
     steps = nums
   }
 
+  let predicate = ''
   if (steps.includes('1') || steps.includes('2')) {
-    return `${var1} --> (+) ${var2}`
+    predicate = 'positive'
   } else if (steps.includes('3') || steps.includes('4')) {
-    return `${var1} --> (-) ${var2}`
+    predicate = 'negative'
   } else {
     throw new Error('Unexpected answer while verifying causal relationship' + JSON.stringify(parsed))
   }
+
+  const verificationReasoning = parsed && parsed.reasoning ? String(parsed.reasoning) : ''
+
+  const out: VerifiedRelationship = {
+    subject: var1,
+    object: var2,
+    predicate,
+    reasoning: `${entry.reasoning}${entry.reasoning && verificationReasoning ? ' | ' : ''}${verificationReasoning}`,
+    relevant: entry.relevant,
+    createdAt: entry.createdAt,
+    verifiedAt: new Date().toISOString(),
+    provenance: { llmRaw: resp.data }
+  }
+  return out
 }
 
 async function computeSimilarities(
@@ -369,17 +387,13 @@ async function checkVariables(
   threshold: number,
   llmModel: string,
   text: string,
-  lines: Array<[string, string, string]>
+  entries: RelationshipEntry[]
 ) {
-  const result_list = lines.map((l) => l[0])
-  const reasoning_list = lines.map((l) => l[1])
-  const rel_txt_list = lines.map((l) => l[2])
-  // collect variables
+  // collect variables from structured entries
   const variable_set = new Set<string>()
-  for (const line of result_list) {
-    const [v1, v2] = extractVariables(line)
-    if (v1) variable_set.add(v1)
-    if (v2) variable_set.add(v2)
+  for (const e of entries) {
+    if (e.subject) variable_set.add(e.subject)
+    if (e.object) variable_set.add(e.object)
   }
   const variable_list = Array.from(variable_set)
   const variable_to_index: { [k: string]: number } = {}
@@ -390,12 +404,12 @@ async function checkVariables(
   }
 
   const similar_variables = await computeSimilarities(embeddingModel, threshold, variable_to_index, index_to_variable)
-  if (!similar_variables) return lines
+  if (!similar_variables) return entries
 
   // Prepare merge prompt to produce structured triples
   const mergeSystem = `You are a Professional System Dynamics Modeler.\nYou will be provided with: Text, Relationships, and Similar Variables.\n- Merge similar variable names by choosing the shorter neutral name.\n- Update every relationship accordingly.\n- Return JSON where each entry has: subject (string), predicate ("positive"|"negative"), object (string), reasoning (string), and relevant text (string).`
-  const prompt = `Relationships (list of [relationship, reasoning, relevant_line]):\n${JSON.stringify(
-    lines
+  const prompt = `You will receive a list of relationship objects and groups of similar variables to merge.\nRelationships:\n${JSON.stringify(
+    entries
   )}\nSimilar Variables (pairs/groups to merge):\n${JSON.stringify(similar_variables)}\nPlease return a single JSON object mapping ordinal keys (\"1\", \"2\", ...) to entries with subject/predicate/object/reasoning/relevant text.`
   const resp = await callLLM(mergeSystem, prompt, 'ollama', 'llama3.1:8b')
   if (!resp.success || !resp.data) throw new Error('LLM failed while merging similar variables')
@@ -415,25 +429,35 @@ async function checkVariables(
     for (const k of keys) relationships.push(parsed[k])
   }
 
-  const new_lines: Array<[string, string, string]> = []
+  // If the merge produced fewer relationships than we started with, prefer the
+  // original entries to avoid accidental over-merging (preserve provenance).
+  try {
+    if (relationships.length < entries.length) {
+      return entries
+    }
+  } catch (e) {
+    // ignore
+  }
+
+  const new_entries: RelationshipEntry[] = []
   for (const r of relationships) {
     const subj = r['subject'] || r['from'] || r['variable1']
     const obj = r['object'] || r['to'] || r['variable2']
     const pred = r['predicate'] || r['polarity'] || r['sign']
     const reasoning = r['reasoning'] || ''
-    const relevant = r['relevant text'] || r['relevant_text'] || ''
-    let relStr = ''
-    if (subj && obj && pred) {
-      const pol = String(pred).toLowerCase().includes('pos') ? '(+)' : '(-)'
-      relStr = `${subj} --> ${pol} ${obj}`
-    } else {
-      continue
-    }
-    if (!relStr) continue
+    const relevant = r['relevant text'] || r['relevant_text'] || r['relevant'] || ''
+    if (!subj || !obj || !pred) continue
     const relevantTxt = await getLine(embeddings, embeddingModel, sentences, String(relevant || ''))
-    new_lines.push([relStr.toLowerCase(), String(reasoning), relevantTxt])
+    new_entries.push({
+      subject: String(subj).toLowerCase(),
+      object: String(obj).toLowerCase(),
+      predicateRaw: String(pred),
+      reasoning: String(reasoning),
+      relevant: String(relevantTxt || ''),
+      createdAt: new Date().toISOString()
+    })
   }
-  return new_lines
+  return new_entries
 }
 
 export function extractVariables(relationship: string) {
