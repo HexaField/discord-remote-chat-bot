@@ -54,6 +54,75 @@ export default function GraphView(props: {
     lastW = w
     lastH = h
 
+    // Pre-cluster nodes by connected components and assign initial positions
+    // so the simulation begins with clusters placed apart and reduces overlap.
+    try {
+      // build adjacency map
+      const adj = new Map<string, Set<string>>()
+      const nodeById = new Map<string, NodeDatum>()
+      for (const n of nodes) nodeById.set(n.id, n)
+      for (const lk of links) {
+        const sid = typeof lk.source === 'string' ? lk.source : (lk.source as NodeDatum).id
+        const tid = typeof lk.target === 'string' ? lk.target : (lk.target as NodeDatum).id
+        if (!sid || !tid) continue
+        if (!adj.has(sid)) adj.set(sid, new Set())
+        if (!adj.has(tid)) adj.set(tid, new Set())
+        adj.get(sid)!.add(tid)
+        adj.get(tid)!.add(sid)
+      }
+
+      // find connected components via DFS
+      const visited = new Set<string>()
+      const components: string[][] = []
+      for (const n of nodes) {
+        const id = n.id
+        if (visited.has(id)) continue
+        const stack = [id]
+        const comp: string[] = []
+        while (stack.length) {
+          const cur = stack.pop() as string
+          if (!cur || visited.has(cur)) continue
+          visited.add(cur)
+          comp.push(cur)
+          const neigh = adj.get(cur)
+          if (!neigh) continue
+          for (const nb of neigh) if (!visited.has(nb)) stack.push(nb)
+        }
+        // also include isolated nodes (no adjacency entries)
+        if (comp.length === 0) comp.push(id)
+        components.push(comp)
+      }
+
+      if (components.length > 0) {
+        const bigR = Math.max(120, Math.min(w, h) / 3)
+        // place each component around a circle
+        for (let ci = 0; ci < components.length; ci++) {
+          const comp = components[ci]
+          const angle = (ci / components.length) * Math.PI * 2
+          const cx = w / 2 + Math.cos(angle) * bigR
+          const cy = h / 2 + Math.sin(angle) * bigR
+          // cluster radius scales with sqrt(size)
+          const clusterRadius = Math.max(30, Math.sqrt(comp.length) * 20)
+          for (let i = 0; i < comp.length; i++) {
+            const id = comp[i]
+            const node = nodeById.get(id)
+            if (!node) continue
+            // scatter nodes within the cluster radius
+            const a = (i / comp.length) * Math.PI * 2 + (Math.random() - 0.5) * 0.5
+            const r = clusterRadius * (0.4 + Math.random() * 0.6)
+            node.x = cx + Math.cos(a) * r
+            node.y = cy + Math.sin(a) * r
+            // small initial velocity to help settling
+            node.vx = (Math.random() - 0.5) * 2
+            node.vy = (Math.random() - 0.5) * 2
+          }
+        }
+      }
+    } catch (e) {
+      // clustering is best-effort; ignore on failure
+      console.debug('Clustering failed', e)
+    }
+
     // Root group and zoomable group
     selection
       .attr('viewBox', `0 0 ${w} ${h}`)
@@ -88,11 +157,13 @@ export default function GraphView(props: {
           .distance((d: any) => {
             const s = typeof d.source === 'string' ? 12 : (d.source.r ?? 12)
             const t = typeof d.target === 'string' ? 12 : (d.target.r ?? 12)
-            return Math.max(40, s + t + 12)
+            // increase base link distance to reduce label/node overlap
+            return Math.max(40, (s + t + 12) * 3)
           })
           .strength(0.8)
       )
-      .force('charge', d3.forceManyBody().strength(-40))
+      // increase repulsion to scale the simulation up (twice the previous strength)
+      .force('charge', d3.forceManyBody().strength(-80))
       .force('center', d3.forceCenter(w / 2, h / 2))
       .force('x', d3.forceX(w / 2).strength(0.02))
       .force('y', d3.forceY(h / 2).strength(0.02))
