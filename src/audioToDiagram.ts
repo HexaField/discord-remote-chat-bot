@@ -4,15 +4,24 @@ import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { generateCausalRelationships } from './cld'
-import { exportGraphViz } from './exporters/graphVizExporter'
 import exportMermaid from './exporters/mermaidExporter'
 import { exportGraphJSON, loadGraphJSON } from './exporters/rdfExporter'
-import { convertTo16kMonoWav, ensureFfmpegAvailable } from './ffmpeg'
+import { ensureFfmpegAvailable } from './ffmpeg'
 import { callLLM } from './llm'
 import { debug, info } from './logger'
 import { ensureWhisperAvailable, transcribeWithWhisper } from './whisper'
 
 const TMP_DIR = path.resolve(appRootPath.path, '.tmp/audio-to-diagram')
+
+async function existsNonEmpty(p: string) {
+  try {
+    const stat = await fsp.stat(p)
+    console.log(`File ${p} exists:`, stat.isFile() && stat.size > 0)
+    return stat.isFile() && stat.size > 0
+  } catch (e) {
+    return false
+  }
+}
 
 function normalizeCSL(txt: string) {
   return txt
@@ -83,19 +92,13 @@ async function downloadToFile(url: string, dest: string) {
  * Accepts an audio file URL, returns the path to the generated Kumu JSON file.
  */
 export async function transcribeAudioFile(inputPath: string, transcriptPath: string, audioFormat = 'mp3') {
-  // Convert in-place to standardized audio filename under transcript directory
+  // Use the input file directly (whisper supports mp3); no WAV conversion required
   const dir = path.dirname(transcriptPath)
-  const audioPath =
-    path.extname(inputPath).toLowerCase() === `.${audioFormat}` ? inputPath : path.join(dir, `audio.${audioFormat}`)
   const outBase = path.join(dir, 'transcript')
-
-  if (inputPath !== audioPath) {
-    await convertTo16kMonoWav(inputPath, audioPath)
-  }
 
   // Transcribe (WHISPER_MODEL env or default)
   const WHISPER_MODEL = process.env.WHISPER_MODEL || path.join(os.homedir(), 'models/ggml-base.en.bin')
-  await transcribeWithWhisper(WHISPER_MODEL, audioPath, transcriptPath, outBase)
+  await transcribeWithWhisper(WHISPER_MODEL, inputPath, transcriptPath, outBase)
 
   // Read raw transcript
   let transcript = await fsp.readFile(transcriptPath, 'utf8')
@@ -258,18 +261,11 @@ export async function generateRelationships(transcript: string, nodes: string[])
   return Array.from(relMap.values())
 }
 
-export async function downloadYoutubeAudio(youtubeURL: string, destPath: string, audioFormat = 'mp3') {
-  // check if it's already downloaded
-  try {
-    await fsp.stat(destPath)
-    return
-  } catch (err) {
-    // not found, proceed to download
-  }
-  return new Promise<void>((resolve, reject) => {
-    const ytdlp = 'yt-dlp' // Assumes yt-dlp is installed and on PATH
-
-    // use lowest quality audio format to minimize download size
+export async function downloadYoutubeSingleWithInfo(youtubeURL: string, sourceDir: string, audioFormat = 'mp3') {
+  const ytdlp = 'yt-dlp'
+  // ensure dir exists
+  await fsp.mkdir(sourceDir, { recursive: true })
+  await new Promise<void>((resolve, reject) => {
     const args = [
       youtubeURL,
       '--sponsorblock-remove',
@@ -280,15 +276,23 @@ export async function downloadYoutubeAudio(youtubeURL: string, destPath: string,
       '--audio-format',
       audioFormat,
       '-o',
-      destPath
+      path.join(sourceDir, `audio.${audioFormat}`)
     ]
-    execFile(ytdlp, args, (error, stdout, stderr) => {
-      if (error) {
-        return reject(new Error(`yt-dlp error: ${error.message}\n${stderr}`))
-      }
+    execFile(ytdlp, args, { cwd: sourceDir }, (error, stdout, stderr) => {
+      if (error) return reject(new Error(`yt-dlp (single) error: ${error.message}\n${stderr}`))
       resolve()
     })
   })
+  const files = await fsp.readdir(sourceDir)
+  const audioFiles = files.filter((f) => f.endsWith(`.${audioFormat}`))
+  if (audioFiles.length === 0) throw new Error('No audio file produced by yt-dlp')
+  // choose the first audio file
+  const audioFile = audioFiles[0]
+  return path.join(sourceDir, audioFile)
+}
+
+function normalizeTranscript(text: string) {
+  return text.replace(/\r/g, '').replace(/\n+/g, ' ').replace(/\s+/g, ' ').trim()
 }
 
 export default async function audioToDiagram(audioURL: string, onProgress?: (message: string) => void | Promise<void>) {
@@ -324,36 +328,77 @@ export default async function audioToDiagram(audioURL: string, onProgress?: (mes
   await fsp.mkdir(sourceDir, { recursive: true })
 
   const audioPath = path.join(sourceDir, `audio.${audioFormat}`)
-  const transcriptPath = path.join(sourceDir, `transcript.txt`)
+  const transcriptPath = path.join(sourceDir, `audio.vtt`)
   const graphJSONPath = path.join(sourceDir, `graph.json`)
 
-  // Download
-  await notify('Downloading audio…')
-  if (audioURL.includes('youtube.com') || audioURL.includes('youtu.be')) {
-    await downloadYoutubeAudio(audioURL, audioPath, audioFormat)
-  } else {
-    await downloadToFile(audioURL, audioPath)
-  }
-
-  // Transcribe (reuse existing transcript if present)
-  async function existsNonEmpty(p: string) {
-    try {
-      const stat = await fsp.stat(p)
-      console.log(`File ${p} exists:`, stat.isFile() && stat.size > 0)
-      return stat.isFile() && stat.size > 0
-    } catch (e) {
-      return false
+  if (!(await existsNonEmpty(audioPath))) {
+    // Download strictly using chapter splitting for YouTube; for direct audio URLs, download as-is
+    await notify('Downloading audio (chapters if available)…')
+    if (audioURL.includes('youtube.com') || audioURL.includes('youtu.be')) {
+      // Download a single file + info.json, then transcribe once and split by chapters
+      await downloadYoutubeSingleWithInfo(audioURL, sourceDir, audioFormat)
+    } else {
+      await downloadToFile(audioURL, audioPath)
     }
   }
 
-  let transcript: string
-  if (await existsNonEmpty(transcriptPath)) {
-    debug('Using existing transcript at', transcriptPath)
-    transcript = await fsp.readFile(transcriptPath, 'utf8')
-  } else {
-    await notify('Transcribing audio to text…')
-    transcript = await transcribeAudioFile(audioPath, transcriptPath)
+  // Transcribe whole file to VTT (timestamps) so we can split per chapter
+  const outBase = path.join(sourceDir, 'audio')
+  const WHISPER_MODEL = process.env.WHISPER_MODEL || path.join(os.homedir(), 'models/ggml-base.en.bin')
+  if (!(await existsNonEmpty(transcriptPath))) {
+    await transcribeWithWhisper(WHISPER_MODEL, audioPath, transcriptPath, outBase)
   }
+
+  const transcripts = [] as string[]
+  // Read VTT content and try to extract either NOTE Chapter ranges (yt-dlp style)
+  // or individual cue blocks. We want each timestamped section as its own transcript.
+  const vttContent = await fsp.readFile(path.join(sourceDir, `audio.vtt`), 'utf8')
+
+  // First, try to detect NOTE Chapter entries (some yt-dlp outputs include these)
+  const chapterNoteRegex = /NOTE Chapter: (.+?)\s+(\d{2}:\d{2}:\d{2}\.\d{3}) --> (\d{2}:\d{2}:\d{2}\.\d{3})/g
+  let m: RegExpExecArray | null
+  const chapters: Array<{ title: string; start: string; end: string }> = []
+  while ((m = chapterNoteRegex.exec(vttContent)) !== null) {
+    chapters.push({ title: m[1].trim(), start: m[2], end: m[3] })
+  }
+
+  // Regex to capture VTT cues: start --> end then the cue text (non-greedy)
+  const cueRegex =
+    /(\d{2}:\d{2}:\d{2}\.\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}\.\d{3})\s*\n([\s\S]*?)(?=\n\s*\d{2}:\d{2}:\d{2}\.\d{3}\s*-->|$)/gm
+
+  if (chapters.length === 0) {
+    // No chapters: split by each cue and use the cue text as a transcript chunk
+    let cueMatch: RegExpExecArray | null
+    while ((cueMatch = cueRegex.exec(vttContent)) !== null) {
+      const cueText = cueMatch[3].replace(/\n+/g, ' ').trim()
+      if (cueText.length > 0) transcripts.push(normalizeTranscript(cueText))
+    }
+
+    // Fallback: if no cues found (malformed VTT), use the whole transcript file
+    if (transcripts.length === 0) {
+      const fullTranscript = await fsp.readFile(transcriptPath, 'utf8')
+      transcripts.push(normalizeTranscript(fullTranscript))
+    }
+  } else {
+    // We have chapter ranges: for each chapter, collect cue texts that fall within the range
+    for (const chapter of chapters) {
+      let chapterText = ''
+      let cueMatch: RegExpExecArray | null
+      cueRegex.lastIndex = 0
+      while ((cueMatch = cueRegex.exec(vttContent)) !== null) {
+        const startTime = cueMatch[1]
+        const endTime = cueMatch[2]
+        // lexical compare works for HH:MM:SS.mmm format
+        if (startTime >= chapter.start && endTime <= chapter.end) {
+          chapterText += cueMatch[3].replace(/\n+/g, ' ').trim() + ' '
+        }
+      }
+      if (chapterText.trim().length > 0) transcripts.push(normalizeTranscript(chapterText))
+    }
+  }
+
+  console.log(`Generated ${transcripts.length} transcript chunk(s) from ${chapters.length} chapter(s)`)
+  console.log(transcripts)
 
   // Generate nodes and relationships. If a graph JSON exists, load it and use that as the source of truth.
 
@@ -381,7 +426,8 @@ export default async function audioToDiagram(audioURL: string, onProgress?: (mes
     //   try {
     await notify('Extracting causal relationships (System Dynamics Bot)…')
     const cld = await generateCausalRelationships(
-      transcript,
+      transcripts,
+      notify,
       0.85,
       true,
       process.env.SDB_LLM_MODEL,
@@ -392,7 +438,6 @@ export default async function audioToDiagram(audioURL: string, onProgress?: (mes
     }
     nodes = cld.nodes
     relationships = cld.relationships
-    statements = cld.statements
     // generatedFromSDB = true
     // } catch (err) {
     //   console.warn('System-Dynamics-Bot failed; falling back to LLM-based extraction:', (err as any)?.message || err)
@@ -455,7 +500,7 @@ export default async function audioToDiagram(audioURL: string, onProgress?: (mes
     if (needGraph) {
       info('Writing graph JSON for', baseName)
       await notify('Writing graph data…')
-      await exportGraphJSON(sourceDir, nodes, relationships, statements)
+      await exportGraphJSON(sourceDir, nodes, relationships)
     } else {
       debug('Graph JSON already exists for', baseName)
     }
@@ -481,21 +526,6 @@ export default async function audioToDiagram(audioURL: string, onProgress?: (mes
       }
     } catch (e: any) {
       console.warn('Failed to export mermaid for', baseName, e?.message ?? e)
-    }
-  } else if (graphType === 'graphviz') {
-    try {
-      const needDOT = !(await existsNonEmpty(graphvizDOT))
-      const needSVG = !(await existsNonEmpty(graphvizSVG))
-      const needPNG = !(await existsNonEmpty(graphvizPNG))
-      if (needDOT || needSVG || needPNG) {
-        info('Writing graphviz artifacts for', baseName)
-        await notify('Rendering diagram (Graphviz)…')
-        await exportGraphViz(sourceDir, 'graphviz', statements)
-      } else {
-        debug('Graphviz artifacts already exist for', baseName)
-      }
-    } catch (e: any) {
-      console.warn('Failed to export graphviz for', baseName, e?.message ?? e)
     }
   }
 

@@ -22,18 +22,12 @@ export function buildStatements(relationships: Relationship[]) {
   return statements
 }
 
-export async function exportGraphJSON(
-  dir: string,
-  nodes: string[],
-  relationships: Relationship[],
-  statements?: string[]
-) {
+export async function exportGraphJSON(dir: string, nodes: string[], relationships: Relationship[]) {
   await fsp.mkdir(dir, { recursive: true })
   const jsonPath = path.join(dir, `graph.json`)
   const data = {
     nodes,
-    relationships,
-    statements: statements && statements.length > 0 ? statements : buildStatements(relationships)
+    relationships
   }
   await atomicWrite(jsonPath, JSON.stringify(data, null, 2))
   return { jsonPath }

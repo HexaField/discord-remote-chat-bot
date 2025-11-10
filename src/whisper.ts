@@ -23,12 +23,14 @@ export async function ensureWhisperAvailable() {
  * - outTxtPath: expected output txt path (whisper-cli writes `<of>-transcript.txt` sometimes; to keep things simple we follow the original CLI flags and check the provided out file)
  * - outBase: base path (without extension) to pass to whisper-cli -of flag
  */
-export async function transcribeWithWhisper(modelPath: string, wavPath: string, outTxtPath: string, outBase: string) {
-  const cmd = `whisper-cli -m ${escapePath(modelPath)} -f ${escapePath(wavPath)} -otxt -of ${escapePath(outBase)}`
+export async function transcribeWithWhisper(modelPath: string, inputPath: string, outPath: string, outBase: string) {
+  const outputFormat = outPath.endsWith('.vtt') ? 'vtt' : 'txt'
+  const oflag = outputFormat === 'vtt' ? '-ovtt' : '-otxt'
+  const cmd = `whisper-cli -m ${escapePath(modelPath)} -f ${escapePath(inputPath)} ${oflag} -of ${escapePath(outBase)}`
   await exec(cmd, { maxBuffer: 20 * 1024 * 1024 })
 
-  // Ensure expected file exists
-  if (!fs.existsSync(outTxtPath)) {
-    throw new Error(`Whisper did not produce transcript at ${outTxtPath}`)
+  // Determine expected file path
+  if (!fs.existsSync(outPath)) {
+    throw new Error(`Whisper did not produce transcript at ${outPath}`)
   }
 }

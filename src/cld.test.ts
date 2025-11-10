@@ -33,37 +33,36 @@ test('generateCausalRelationships', async () => {
 
   // Run the full CLD extraction 5 times in a row and require validity each time
   for (let i = 0; i < 5; i++) {
-    const result = await generateCausalRelationships(largePrompt, 0.85, true)
+    const result = await generateCausalRelationships([largePrompt], async (msg: string) => {}, 0.85, true)
     console.log(result)
 
-    // Expect a non-empty response and structured lines
+    // Expect a non-empty response and structured nodes/relationships
     expect(result).toBeDefined()
-    expect(Array.isArray(result.statements)).toBe(true)
-    expect(result.statements.length).toBeGreaterThan(0)
+    expect(Array.isArray(result.nodes)).toBe(true)
+    expect(Array.isArray(result.relationships)).toBe(true)
+    expect(result.relationships.length).toBeGreaterThan(0)
 
-    const parsed = result.statements.map((l: string) => {
-      const parts = l.split('-->')
+    const parsed = result.relationships.map((r: any) => {
       return {
-        raw: l,
-        left: parts[0] ? norm(parts[0]) : '',
-        right: parts[1] ? norm(parts[1]) : '',
-        hasValence: /\(\+\)|\(-\)/.test(l)
+        subject: norm(String(r.subject || '')),
+        object: norm(String(r.object || '')),
+        predicate: String(r.predicate || '')
       }
     })
 
-    // Ensure every produced relationship includes valence (+) or (-)
+    // Ensure every produced relationship has a predicate of 'positive' or 'negative'
     for (const p of parsed) {
-      expect(p.hasValence).toBe(true)
+      expect(['positive', 'negative']).toContain(p.predicate)
     }
 
     let found = 0
     for (const [causeKeys, effectKeys] of expectedKeywordPairs) {
-      const ok = parsed.some((p: { left: string; right: string; hasValence: boolean }) => {
-        const left = p.left
-        const right = p.right
+      const ok = parsed.some((p: { subject: string; object: string; predicate: string }) => {
+        const left = p.subject
+        const right = p.object
         const causeOk = causeKeys.some((k) => left.includes(k))
         const effectOk = effectKeys.some((k) => right.includes(k))
-        return causeOk && effectOk && p.hasValence
+        return causeOk && effectOk
       })
       if (ok) found++
     }

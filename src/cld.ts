@@ -1,5 +1,6 @@
 import fs from 'fs'
 import { callLLM, getEmbedding } from './llm'
+import { debug, warn } from './logger'
 
 function simpleSentenceSplit(text: string): string[] {
   // very simple sentence splitter
@@ -18,11 +19,10 @@ You will conduct a multistep process:
    - Minimize the number of distinct variables.
    - Variable names should be neutral (no positive/negative connotation).
 
-2. For each relationship, output a JSON object with explicit fields and never a combined string:
+2. For each relationship, output a JSON object with explicit fields:
    - subject: the cause variable name (string)
    - predicate: one of "positive" or "negative" (string)
    - object: the effect variable name (string)
-   Also include:
    - reasoning: brief explanation (string)
    - relevant text: the exact text span that supports the relationship (string)
 
@@ -32,137 +32,155 @@ You will conduct a multistep process:
 
 3. Not all variables must have relationships.
 
-4. When three variables are related in a sentence, ensure the second and third variables have the correct sign.
-   Example: "Variable1 inhibits Variable2, leading to less Variable3" implies Variable2 ->(+) Variable3.
-
-5. If there are no causal relationships in the provided text, return empty JSON {}.
-
-Example 1 (input):
-"when death rate goes up, population decreases"
-
-JSON response:
-{"1": {"reasoning": "[reasoning]", "subject": "Death rate", "predicate": "negative", "object": "population",  "relevant text": "[supporting text]"}}
-
-Example 2 (input):
-"increased death rate reduces population"
-
-JSON response:
-{"1": {"reasoning": "[reasoning]", "subject": "Death rate", "predicate": "negative", "object": "population",  "relevant text": "[supporting text]"}}
-
-Example 3 (input):
-"lower death rate increases population"
-
-JSON response:
-{"1": {"reasoning": "[reasoning]", "subject": "Death rate", "predicate": "negative", "object": "population",  "relevant text": "[supporting text]"}}
-
-Example 4 (input):
-"The engineers compare the work remaining to be done against the time remaining before the deadline. The larger the gap, the more Schedule Pressure they feel. When schedule pressure builds up, engineers have several choices. First, they can work overtime. Instead of the normal 50 hours per week, they can come to work early, skip lunch, stay late, and work through the weekend. By burning the Midnight Oil, they increase the rate at which they complete their tasks, cut the backlog of work, and relieve the schedule pressure. However, if the workweek stays too high too long, fatigue sets in and productivity suffers. As productivity falls, the task completion rate drops, which increases schedule pressure and leads to still longer hours. Another way to complete the work faster is to reduce the time spent on each task. Spending less time on each task boosts the number of tasks done per hour (productivity) and relieves schedule pressure. Lower time per task increases error rate, which leads to rework and lower productivity in the long run."
-
-JSON response (truncated):
-{
-  "1": {"reasoning": "[reasoning]", "subject": "work remaining", "predicate": "positive", "object": "Schedule Pressure", "relevant text": "[supporting text]"},
-  "2": {"reasoning": "[reasoning]", "subject": "time remaining", "predicate": "negative", "object": "Schedule Pressure", "relevant text": "[supporting text]"},
-  "3": {"reasoning": "[reasoning]", "subject": "Schedule Pressure", "predicate": "positive", "object": "overtime", "relevant text": "[supporting text]"},
-  "4": {"reasoning": "[reasoning]", "subject": "overtime", "predicate": "positive", "object": "completion rate", "relevant text": "[supporting text]"},
-  "5": {"reasoning": "[reasoning]", "subject": "completion rate", "predicate": "negative", "object": "work remaining", "relevant text": "[supporting text]"},
-  "6": {"reasoning": "[reasoning]", "subject": "overtime", "predicate": "positive", "object": "fatigue", "relevant text": "[supporting text]"},
-  "7": {"reasoning": "[reasoning]", "subject": "fatigue", "predicate": "negative", "object": "productivity", "relevant text": "[supporting text]"},
-  "8": {"reasoning": "[reasoning]", "subject": "productivity", "predicate": "positive", "object": "completion rate", "relevant text": "[supporting text]"},
-  "9": {"reasoning": "[reasoning]", "subject": "Schedule Pressure", "predicate": "negative", "object": "Time per task", "relevant text": "[supporting text]"},
-  "10": {"reasoning": "[reasoning]", "subject": "Time per task", "predicate": "negative", "object": "error rate", "relevant text": "[supporting text]"},
-  "11": {"reasoning": "[reasoning]", "subject": "error rate", "predicate": "negative", "object": "productivity", "relevant text": "[supporting text]"}
-}
-
-Example 5 (input):
-"Congestion (i.e., travel time) creates pressure for new roads; after the new capacity is added, travel time falls, relieving the pressure. New roads are built to relieve congestion. In the short run, travel time falls and attractiveness of driving goes up—the number of cars in the region hasn’t changed and people’s habits haven’t adjusted to the new, shorter travel times. As people notice that they can now get around much faster than before, they will take more Discretionary trips (i.e., more trips per day). They will also travel extra miles, leading to higher trip length. Over time, seeing that driving is now much more attractive than other modes of transport such as the public transit system, some people will give up the bus or subway and buy a car. The number of cars per person rises as people ask why they should take the bus."
-
-JSON response (truncated):
-{
-  "1": {"reasoning": "[reasoning]", "subject": "travel time", "predicate": "positive", "object": "pressure for new roads", "relevant text": "[supporting text]"},
-  "2": {"reasoning": "[reasoning]", "subject": "pressure for new roads", "predicate": "positive", "object": "road construction", "relevant text": "[supporting text]"},
-  "3": {"reasoning": "[reasoning]", "subject": "road construction", "predicate": "positive", "object": "Highway capacity", "relevant text": "[supporting text]"},
-  "4": {"reasoning": "[reasoning]", "subject": "Highway capacity", "predicate": "negative", "object": "travel time", "relevant text": "[supporting text]"},
-  "5": {"reasoning": "[reasoning]", "subject": "travel time", "predicate": "negative", "object": "attractiveness of driving", "relevant text": "[supporting text]"},
-  "6": {"reasoning": "[reasoning]", "subject": "attractiveness of driving", "predicate": "positive", "object": "trips per day", "relevant text": "[supporting text]"},
-  "7": {"reasoning": "[reasoning]", "subject": "trips per day", "predicate": "positive", "object": "traffic volume", "relevant text": "[supporting text]"},
-  "8": {"reasoning": "[reasoning]", "subject": "traffic volume", "predicate": "positive", "object": "travel time", "relevant text": "[supporting text]"},
-  "9": {"reasoning": "[reasoning]", "subject": "attractiveness of driving", "predicate": "positive", "object": "trip length", "relevant text": "[supporting text]"},
-  "10": {"reasoning": "[reasoning]", "subject": "trip length", "predicate": "positive", "object": "traffic volume", "relevant text": "[supporting text]"},
-  "11": {"reasoning": "[reasoning]", "subject": "attractiveness of driving", "predicate": "negative", "object": "public transit", "relevant text": "[supporting text]"},
-  "12": {"reasoning": "[reasoning]", "subject": "public transit", "predicate": "negative", "object": "cars per person", "relevant text": "[supporting text]"},
-  "13": {"reasoning": "[reasoning]", "subject": "cars per person", "predicate": "positive", "object": "traffic volume", "relevant text": "[supporting text]"}
-}
-
-Example 6 (input):
-"[Text with no causal relationships]"
-
-JSON response:
-{}
+4. If there are no causal relationships in the provided text, return empty JSON {}.
 
 Only return the JSON as shown—no prose, no markdown.
 `
 
 export async function generateCausalRelationships(
-  question: string,
+  sentences: string[],
+  onProgress: (msg: string) => void,
   threshold = 0.85,
   verbose = false,
   llmModel = 'github-copilot/gpt-5-mini',
   embeddingModel = 'bge-m3:latest'
 ) {
-  const sentences = simpleSentenceSplit(question)
-  const embeddings = await initEmbeddings(sentences, embeddingModel)
-  // Mirror the original Python multi-step flow:
-  // 1) initial generation (JSON numbered dict with 'causal relationship', 'reasoning', 'relevant text')
-  // 2) follow-up to close implied loops
-  // 3) normalize and merge the two responses
-  // 4) map to tuples and return a numbered list of corrected relationships after variable checking
-
-  // Step 1: initial generation
-  const resp1 = await callLLM(systemPrompt, question, 'opencode', llmModel)
-  if (!resp1.success || !resp1.data) throw new Error('LLM failed to produce an initial response')
-  const response1 = loadJson(resp1.data)
-  if (!response1 || Object.keys(response1).length === 0) {
-    throw new Error('Input text did not have any causal relationships!')
+  // Generate a short topic summary: ask the LLM to produce a few short sentences about
+  // the overall topic of the provided transcript. We join those sentences into a
+  // single topic string which will be used to classify sentence relevance below.
+  let topicSummary = ''
+  try {
+    const topicSystem = `You are a helpful assistant. Given a transcript, generate 2-4 short sentences that describe the main topic(s) covered. Return only the sentences, each on its own line.`
+    const joined = sentences.join('\n')
+    const topicResp = await callLLM(topicSystem, joined, 'ollama', llmModel)
+    if (topicResp && topicResp.success && topicResp.data) {
+      // convert to string and split into sentences, then join into single-line summary
+      const raw = String(topicResp.data)
+      const topicLines = raw
+        .split(/\r?\n/) // split on newlines
+        .map((s) => s.trim())
+        .filter(Boolean)
+      topicSummary = topicLines.join(' ')
+    }
+  } catch (e) {
+    if (verbose) console.warn('Failed to generate topic summary:', e)
+    topicSummary = ''
   }
 
-  // Step 2: ask the model to find closed loops and add extra relationships if needed
-  const loopQuery = `Find out if there are any possibilities of forming closed loops that are implied in the text. If yes, then close the loops by adding the extra relationships and provide them in a JSON format please.`
-  const resp2 = await callLLM(systemPrompt, loopQuery, 'opencode', llmModel)
-  const response2 = resp2.success && resp2.data ? loadJson(resp2.data) : null
+  const embeddings = await initEmbeddings(sentences, embeddingModel)
 
-  // Only merge if response2 has actual content
-  const merged: any = response2 && Object.keys(response2).length > 0 ? { ...response1, ...response2 } : response1
+  let globalIndex = 1
+  const aggregated: { [k: string]: any } = {}
+  let anyFound = false
 
-  // Normalize merged into an object mapping like Python expected
-  const responseDict: { [k: string]: any } = merged
+  for (let i = 0; i < sentences.length; i++) {
+    const sentence = sentences[i]
+    const sec = sentence.trim()
+    if (!sec) continue
+    // If we have a topic summary, classify this sentence as relevant or irrelevant
+    // to the topic. The classifier is constrained to answer only 'yes' or 'no'.
+    if (topicSummary) {
+      try {
+        const clsSystem = `You are a classification assistant. Here is a short topic summary:\n${topicSummary}\n\nFor the given sentence, answer ONLY 'yes' or 'no' (lowercase) indicating whether the sentence is relevant to the topic summary.`
+        const clsResp = await callLLM(clsSystem, sec, 'ollama', 'llama3.1:8b')
+        if (clsResp && clsResp.success && clsResp.data) {
+          const ans = String(clsResp.data).trim().toLowerCase()
+          // Accept responses that start with yes/no
+          const first = (ans.match(/^(yes|no)/) || [])[0]
+          if (first === 'no') {
+            // skip irrelevant sentence
+            debug(`Skipping sentence ${i + 1} as irrelevant to topic`)
+            continue
+          }
+          // If it's 'yes' we proceed. If uncertain, we proceed as a conservative default.
+        }
+      } catch (e) {
+        debug('Classification failed, proceeding with sentence:', e)
+      }
+    }
+    // Step 1 (per section)
+    const resp1 = await callLLM(systemPrompt, sec, 'ollama', 'llama3.1:8b')
+    if (!resp1.success || !resp1.data) {
+      warn('LLM failed to produce initial response for a section')
+      continue
+    }
+    const response1 = loadJson(resp1.data)
+    // If empty, skip this section silently
+    if (!response1 || Object.keys(response1).length === 0) {
+      debug('No causal relationships in section')
+      continue
+    }
+    anyFound = true
 
+    // Step 2 (per section) - loop closure specific to this section.
+    // const loopQuery = `Find out if there are any possibilities of forming closed loops that are implied in the text. If yes, then close the loops by adding the extra relationships and provide them in a JSON format please.`
+    // const resp2 = await callLLM(systemPrompt, loopQuery, 'ollama', 'llama3.1:8b')
+    // const response2 = resp2.success && resp2.data ? loadJson(resp2.data) : null
+
+    const response2 = response1
+
+    const mergedSection: any =
+      response2 && Object.keys(response2).length > 0 ? { ...response1, ...response2 } : response1
+
+    // Reindex merged section entries into aggregated dict.
+    const keys = Object.keys(mergedSection)
+    for (const k of keys) {
+      const entry = mergedSection[k]
+      aggregated[String(globalIndex++)] = entry
+    }
+
+    onProgress(`Generating Causal Relationships: Processed ${i + 1} of ${sentences.length} sections`)
+  }
+
+  if (!anyFound) throw new Error('Input text did not have any causal relationships across all sections!')
+
+  const responseDict: {
+    [k: string]: {
+      subject: string
+      predicate: string
+      object: string
+      reasoning: string
+      relevant: string
+    }
+  } = aggregated
+
+  // Build temporary relationship lines from structured S/P/O entries so we can reuse
+  // the existing embedding-driven merging and verification pipeline.
   // lines: [relationshipString, reasoning, relevantLine]
-  // relationshipString kept temporarily as "var1 --> (+) var2" to reuse downstream logic; built from structured triple.
   const lines: Array<[string, string, string]> = []
   for (const k of Object.keys(responseDict)) {
     const entry = responseDict[k]
-    // Preferred structured fields
-    const subject = entry['subject'] || entry['from'] || entry['variable1']
-    const object = entry['object'] || entry['to'] || entry['variable2']
-    const predicate = entry['predicate'] || entry['polarity'] || entry['sign']
-    const reasoning = entry['reasoning'] || ''
-    const relevant = entry['relevant text'] || entry['relevant_text'] || entry['relevant'] || ''
+    const subject = entry.subject
+    const object = entry.object
+    const predicateRaw = entry.predicate
+    const reasoning = entry.reasoning
+    const relevant = entry.relevant
 
-    let relationship = ''
-    if (subject && object && predicate) {
-      const pol = String(predicate).toLowerCase().includes('pos') ? '(+)' : '(-)'
-      relationship = `${subject} --> ${pol} ${object}`
-    } else {
+    if (!subject || !object || !predicateRaw) {
+      console.warn('Skipping incomplete entry:', entry)
       continue
     }
-    if (!relationship) continue
+
+    const pol = predicateRaw.toLowerCase().includes('pos') ? '(+)' : '(-)'
+    const relationship = `${subject} --> ${pol} ${object}`
     const relevantTextLine = relevant ? await getLine(embeddings, embeddingModel, sentences, String(relevant)) : ''
     lines.push([relationship.toLowerCase(), String(reasoning || ''), String(relevantTextLine || '')])
   }
 
-  // Step 3: check and merge similar variables via LLM-driven logic
-  const checked = await checkVariables(embeddings, embeddingModel, sentences, threshold, llmModel, question, lines)
-  console.log('Checked', checked.length, 'relationships')
+  onProgress(`Generating Causal Relationships: Checking ${lines.length} relationships...`)
+
+  // Step 3: check and merge similar variables via LLM-driven logic (reuses existing helper)
+  const checked = await checkVariables(
+    embeddings,
+    embeddingModel,
+    sentences,
+    threshold,
+    llmModel,
+    sentences.join('\n'),
+    lines
+  )
+
+  console.log('Checked from', lines.length, 'to', checked.length, 'relationships')
 
   // Step 4: verify each relationship and produce final corrected lines (1-based numbering)
   const corrected: string[] = []
@@ -172,6 +190,10 @@ export async function generateCausalRelationships(
     const verified = await checkCausalRelationships(vals[0], vals[1], relevantTxt)
     corrected.push(`${i + 1}. ${verified}`)
   }
+
+  console.log('Corrected from', checked.length, 'to', corrected.length, 'relationships')
+
+  onProgress(`Generating Causal Relationships: Formatting ${corrected.length} relationships...`)
 
   // dedupe and normalize lines
   const correctedLines = corrected.map((l) => l.replace(/^[0-9]+\.\s*/, '').trim()).filter(Boolean)
@@ -232,8 +254,7 @@ export async function generateCausalRelationships(
     if (!nodes.includes(objectPart)) nodes.push(objectPart)
   }
 
-  // Return only structured triples plus node list; statements kept for backward compatibility but can be removed later.
-  return { nodes, relationships, statements: uniqNormalized }
+  return { nodes, relationships }
 }
 
 async function initEmbeddings(sentences: string[], embeddingModel: string) {
@@ -372,11 +393,11 @@ async function checkVariables(
   if (!similar_variables) return lines
 
   // Prepare merge prompt to produce structured triples
-  const mergeSystem = `You are a Professional System Dynamics Modeler.\nYou will be provided with: Text, Relationships, and Similar Variables.\n- Merge similar variable names by choosing the shorter neutral name.\n- Update every relationship accordingly.\n- Return JSON where each entry has: subject (string), predicate ("positive"|"negative"), object (string), reasoning (string), and relevant text (string).\n- Do not return combined strings like \"A --> (+) B\".`
-  const prompt = `Text:\n${text}\nRelationships (list of [relationship, reasoning, relevant_line]):\n${JSON.stringify(
+  const mergeSystem = `You are a Professional System Dynamics Modeler.\nYou will be provided with: Text, Relationships, and Similar Variables.\n- Merge similar variable names by choosing the shorter neutral name.\n- Update every relationship accordingly.\n- Return JSON where each entry has: subject (string), predicate ("positive"|"negative"), object (string), reasoning (string), and relevant text (string).`
+  const prompt = `Relationships (list of [relationship, reasoning, relevant_line]):\n${JSON.stringify(
     lines
   )}\nSimilar Variables (pairs/groups to merge):\n${JSON.stringify(similar_variables)}\nPlease return a single JSON object mapping ordinal keys (\"1\", \"2\", ...) to entries with subject/predicate/object/reasoning/relevant text.`
-  const resp = await callLLM(mergeSystem, prompt, 'opencode', llmModel)
+  const resp = await callLLM(mergeSystem, prompt, 'ollama', 'llama3.1:8b')
   if (!resp.success || !resp.data) throw new Error('LLM failed while merging similar variables')
   const parsed = loadJson(resp.data)
   if (!parsed) throw new Error('Got no corrected response from the assistant')

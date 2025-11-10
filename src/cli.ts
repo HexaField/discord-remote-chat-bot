@@ -3,8 +3,7 @@ import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import {
-  downloadYoutubeAudio,
+import audioToDiagram, {
   generateNodes,
   generateRelationships,
   Relationship,
@@ -12,26 +11,29 @@ import {
   transcribeAudioFile
 } from './audioToDiagram'
 import { buildMermaid, exportMermaid } from './exporters/mermaidExporter'
+// audioToDiagram will handle YouTube download+split; whisper is used internally there
 
 async function cmdTranscribe(input: string, output: string) {
   if (!input || !output) {
-    throw new Error('Usage: transcribe <input.ext> <output.txt>')
+    throw new Error('Usage: transcribe <input.ext|youtube-url> <outputDir|output.txt>')
   }
 
-  let audioPath = input
-
-  // Download
+  // If input is a YouTube URL, run the full audio->diagram pipeline which will download, transcribe and split
   if (input.includes('youtube.com') || input.includes('youtu.be')) {
-    await downloadYoutubeAudio(input, output.replace(/\.txt$/i, '.mp3'))
-    audioPath = output.replace(/\.txt$/i, '.mp3')
+    const res = await audioToDiagram(input, (m) => console.log(m))
+    const files = await fsp.readdir(res.dir)
+    const txts = files.filter((f) => f.endsWith('.txt'))
+    console.log('Transcripts written:')
+    for (const t of txts) console.log(path.join(res.dir, t))
+    return
   }
 
+  // Non-YouTube: treat as a local audio file and create a single transcript file
+  const audioPath = input
   if (!fs.existsSync(audioPath)) throw new Error(`Input not found: ${audioPath}`)
-
-  const baseName = path.basename(audioPath, path.extname(audioPath))
   const tmpDir = os.tmpdir()
   await fsp.mkdir(tmpDir, { recursive: true })
-  const transcriptPath = path.join(tmpDir, `${baseName}.txt`)
+  const transcriptPath = path.join(tmpDir, `${path.basename(audioPath, path.extname(audioPath))}.txt`)
 
   const transcript = await transcribeAudioFile(audioPath, transcriptPath)
   await fsp.writeFile(output, transcript, 'utf8')
