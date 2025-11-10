@@ -375,35 +375,35 @@ export default async function audioToDiagram(audioURL: string, onProgress?: (mes
     }
   }
   if (!loadedFromGraph) {
-    const useSDB = Boolean(process.env.USE_SYSTEM_DYNAMICS_BOT)
-    let generatedFromSDB = false
-    if (useSDB) {
-      try {
-        await notify('Extracting causal relationships (System Dynamics Bot)…')
-        const cld = await generateCausalRelationships(
-          transcript,
-          0.85,
-          true,
-          process.env.SDB_LLM_MODEL,
-          process.env.SDB_EMBEDDING_MODEL
-        )
-        if (cld.nodes.length === 0 || cld.relationships.length === 0) {
-          throw new Error('Failed to extract any nodes or relationships')
-        }
-        nodes = cld.nodes
-        relationships = cld.relationships
-        statements = cld.statements
-        generatedFromSDB = true
-      } catch (err) {
-        console.warn('System-Dynamics-Bot failed; falling back to LLM-based extraction:', (err as any)?.message || err)
-      }
+    // const useSDB = Boolean(process.env.USE_SYSTEM_DYNAMICS_BOT)
+    // let generatedFromSDB = false
+    // if (useSDB) {
+    //   try {
+    await notify('Extracting causal relationships (System Dynamics Bot)…')
+    const cld = await generateCausalRelationships(
+      transcript,
+      0.85,
+      true,
+      process.env.SDB_LLM_MODEL,
+      process.env.SDB_EMBEDDING_MODEL
+    )
+    if (cld.nodes.length === 0 || cld.relationships.length === 0) {
+      throw new Error('Failed to extract any nodes or relationships')
     }
-    if (!generatedFromSDB) {
-      await notify('Extracting concepts (nodes)…')
-      nodes = await generateNodes(transcript)
-      await notify('Extracting relationships between concepts…')
-      relationships = await generateRelationships(transcript, nodes)
-    }
+    nodes = cld.nodes
+    relationships = cld.relationships
+    statements = cld.statements
+    // generatedFromSDB = true
+    // } catch (err) {
+    //   console.warn('System-Dynamics-Bot failed; falling back to LLM-based extraction:', (err as any)?.message || err)
+    // }
+    // }
+    // if (!generatedFromSDB) {
+    //   await notify('Extracting concepts (nodes)…')
+    //   nodes = await generateNodes(transcript)
+    //   await notify('Extracting relationships between concepts…')
+    //   relationships = await generateRelationships(transcript, nodes)
+    // }
   }
 
   // Filter out any nodes that don't appear in relationships (no subject/object links)
