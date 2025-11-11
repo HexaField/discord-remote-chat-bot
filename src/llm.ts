@@ -1,6 +1,8 @@
 import axios from 'axios'
 import { spawn } from 'child_process'
+import fs from 'fs'
 import ollama from 'ollama'
+import path from 'path'
 import { debug } from './logger'
 
 const modelSettings = {
@@ -28,6 +30,54 @@ export type LLMResponse = {
 }
 
 export type Provider = 'ollama' | 'opencode' | 'goose' | 'ollama-cli'
+
+// Simple in-memory session stores. For ollama we keep a rolling chat history per session.
+// For CLI-based providers we prefer passing a --session flag, but also retain the
+// last assistant text for optional future heuristics if desired.
+type ChatMessage = { role: 'system' | 'user' | 'assistant'; content: string }
+const ollamaSessions = new Map<string, ChatMessage[]>()
+const cliLastResponses = new Map<string, string>()
+
+// Persistent session storage now lives inside a caller-provided directory (e.g. a sourceDir).
+// We support legacy global path for backward compatibility if no directory supplied.
+function metaFile(sessionId: string, baseDir?: string) {
+  const dir = baseDir ? path.join(baseDir) : path.join(process.cwd(), '.sessions', sessionId)
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+  return path.join(dir, 'meta.json')
+}
+type SessionMeta = {
+  id: string
+  providerData?: {
+    ollama?: { messages: ChatMessage[] }
+    cli?: { last: string[] }
+  }
+  createdAt: string
+  updatedAt: string
+}
+function loadSessionMeta(sessionId: string, baseDir?: string): SessionMeta {
+  const file = metaFile(sessionId, baseDir)
+  if (fs.existsSync(file)) {
+    try {
+      const raw = fs.readFileSync(file, 'utf-8')
+      return JSON.parse(raw)
+    } catch (e) {
+      debug('Failed to parse session meta.json; recreating', e)
+    }
+  }
+  const blank: SessionMeta = {
+    id: sessionId,
+    providerData: { ollama: { messages: [] }, cli: { last: [] } },
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  }
+  saveSessionMeta(blank, baseDir)
+  return blank
+}
+function saveSessionMeta(meta: SessionMeta, baseDir?: string) {
+  const file = metaFile(meta.id, baseDir)
+  meta.updatedAt = new Date().toISOString()
+  fs.writeFileSync(file, JSON.stringify(meta, null, 2))
+}
 
 export async function runCLI(command: string, args: string[], input: string): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -106,17 +156,35 @@ function extractOrCreateJSON(fullMessage: string): any {
   }
 }
 
-async function callOllama(systemPrompt: string, userQuery: string, model: string): Promise<string> {
+async function callOllama(
+  systemPrompt: string,
+  userQuery: string,
+  model: string,
+  sessionId?: string,
+  sessionDir?: string
+): Promise<string> {
+  // Maintain a per-session message history when a sessionId is provided
+  let messages: ChatMessage[]
+  if (sessionId) {
+    const meta = loadSessionMeta(sessionId, sessionDir)
+    messages = (meta.providerData?.ollama?.messages as ChatMessage[]) || []
+    if (messages.length === 0) messages.push({ role: 'system', content: systemPrompt })
+    messages.push({ role: 'user', content: userQuery })
+    ollamaSessions.set(sessionId, messages)
+  } else {
+    messages = [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userQuery }
+    ]
+  }
+
   const response = await ollama.chat({
     model,
     options: {
       num_ctx: modelSettings[model]?.maxContext || MODEL_MAX_CTX
     },
     stream: true,
-    messages: [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userQuery }
-    ]
+    messages
   })
 
   let fullMessage = ''
@@ -125,10 +193,27 @@ async function callOllama(systemPrompt: string, userQuery: string, model: string
       fullMessage += chunk.message.content
     }
   }
+  // Store assistant turn for session continuity
+  if (sessionId) {
+    const hist = ollamaSessions.get(sessionId) || messages
+    hist.push({ role: 'assistant', content: fullMessage })
+    ollamaSessions.set(sessionId, hist)
+    // Persist to disk
+    const meta = loadSessionMeta(sessionId, sessionDir)
+    meta.providerData = meta.providerData || {}
+    meta.providerData.ollama = { messages: hist }
+    saveSessionMeta(meta, sessionDir)
+  }
   return fullMessage
 }
 
-async function callOpencodeCLI(systemPrompt: string, userQuery: string, model: string): Promise<string> {
+async function callOpencodeCLI(
+  systemPrompt: string,
+  userQuery: string,
+  model: string,
+  sessionId?: string,
+  sessionDir?: string
+): Promise<string> {
   // We assume `opencode` CLI is installed. We'll pass the combined prompt as a positional argument.
   const combined = `${systemPrompt}\n${userQuery}`
   // If the model doesn't include a provider (provider/model), try to pick a default available model.
@@ -151,7 +236,9 @@ async function callOpencodeCLI(systemPrompt: string, userQuery: string, model: s
   }
 
   // Use the `run` subcommand with the prompt as a positional argument and request JSON output.
-  const res = await runCLI('opencode', ['run', combined, '-m', modelToUse, '--format', 'json'], '')
+  const args = ['run', combined, '-m', modelToUse, '--format', 'json']
+  // opencode run manages its own sessions; do not force a session flag here.
+  const res = await runCLI('opencode', args, '')
   debug('Opencode CLI output:', res.split('\n').map(extractOrCreateJSON))
 
   const finalRes = res
@@ -160,33 +247,87 @@ async function callOpencodeCLI(systemPrompt: string, userQuery: string, model: s
     .reverse() // get last
     .find((obj) => (obj && typeof obj === 'object' && obj.type === 'text' && obj.part) || obj.text)
 
-  const text = finalRes?.part?.text ?? finalRes?.text?.text ?? ''
+  let text = finalRes?.part?.text ?? finalRes?.text?.text ?? ''
+  if (!text) {
+    // Fallback: if output is a bare JSON object or array, surface it directly
+    try {
+      const maybe = extractOrCreateJSON(res)
+      if (maybe && typeof maybe === 'object') {
+        text = JSON.stringify(maybe)
+      }
+    } catch (e) {
+      // ignore, keep empty text
+    }
+  }
+  if (sessionId) {
+    cliLastResponses.set(sessionId, text)
+    const meta = loadSessionMeta(sessionId, sessionDir)
+    meta.providerData = meta.providerData || {}
+    const prev = meta.providerData.cli?.last || []
+    meta.providerData.cli = { last: [...prev, text] }
+    saveSessionMeta(meta, sessionDir)
+  }
   debug('finalRes:', text)
   return text
 }
 
-async function callGooseCLI(systemPrompt: string, userQuery: string, model: string): Promise<string> {
+async function callGooseCLI(
+  systemPrompt: string,
+  userQuery: string,
+  model: string,
+  sessionId?: string,
+  sessionDir?: string
+): Promise<string> {
   const combined = `${systemPrompt}\n${userQuery}`
   // Try to pick a provider/model that exists locally via opencode models if possible.
   let providerArg = undefined
 
   const args = ['run', '--text', combined, '--no-session']
   if (providerArg) args.push('--provider', providerArg)
+  if (sessionId) args.push('--session-id', sessionId)
   // ignore model and assume it's already configured
   // if (model) args.push('--model', model)
   // Use quiet mode if available to reduce extra output
 
   const out = await runCLI('goose', args, '')
   debug('Goose CLI output:', out)
-  return out
+  if (sessionId) {
+    cliLastResponses.set(sessionId, out)
+    const meta = loadSessionMeta(sessionId, sessionDir)
+    meta.providerData = meta.providerData || {}
+    const prev = meta.providerData.cli?.last || []
+    meta.providerData.cli = { last: [...prev, out] }
+    saveSessionMeta(meta, sessionDir)
+  }
+  return outClean(out)
 }
 
-async function callOllamaCLI(systemPrompt: string, userQuery: string, model: string): Promise<string> {
+async function callOllamaCLI(
+  systemPrompt: string,
+  userQuery: string,
+  model: string,
+  sessionId?: string,
+  sessionDir?: string
+): Promise<string> {
   const combined = `${systemPrompt}\n${userQuery}`
   // Use `ollama run MODEL PROMPT --format json` to get a JSON response when supported.
   // Pass the prompt as a positional argument; do not send via stdin.
-  const out = await runCLI('ollama', ['run', model, combined, '--format', 'json'], '')
-  return out
+  const args = ['run', model, combined, '--format', 'json']
+  const out = await runCLI('ollama', args, '')
+  if (sessionId) {
+    cliLastResponses.set(sessionId, out)
+    const meta = loadSessionMeta(sessionId, sessionDir)
+    meta.providerData = meta.providerData || {}
+    const prev = meta.providerData.cli?.last || []
+    meta.providerData.cli = { last: [...prev, out] }
+    saveSessionMeta(meta, sessionDir)
+  }
+  return outClean(out)
+}
+
+function outClean(s: string): string {
+  // Small normalization to reduce spurious whitespace differences
+  return typeof s === 'string' ? s.trim() : s
 }
 
 /**
@@ -199,8 +340,22 @@ export async function callLLM(
   userQuery: string,
   provider = 'ollama',
   model = 'llama3.2',
-  retries = 2
+  optionsOrRetries?: number | { retries?: number; sessionId?: string; sessionDir?: string }
 ): Promise<LLMResponse> {
+  let retries = 2
+  let sessionId: string | undefined = undefined
+  let sessionDir: string | undefined = undefined
+  if (typeof optionsOrRetries === 'number') {
+    retries = optionsOrRetries
+  } else if (typeof optionsOrRetries === 'object' && optionsOrRetries) {
+    if (typeof optionsOrRetries.retries === 'number') retries = optionsOrRetries.retries
+    if (typeof optionsOrRetries.sessionId === 'string') sessionId = optionsOrRetries.sessionId
+    if (typeof (optionsOrRetries as any).sessionDir === 'string') sessionDir = (optionsOrRetries as any).sessionDir
+  }
+  // Ensure session meta exists when sessionId provided
+  if (sessionId) {
+    loadSessionMeta(sessionId, sessionDir)
+  }
   const tokenCount = (systemPrompt.length + userQuery.length) / 4 // rough estimate
 
   debug('LLM token count', tokenCount)
@@ -215,13 +370,13 @@ export async function callLLM(
     try {
       let raw = ''
       if (provider === 'ollama') {
-        raw = await callOllama(systemPrompt, userQuery, model)
+        raw = await callOllama(systemPrompt, userQuery, model, sessionId, sessionDir)
       } else if (provider === 'opencode') {
-        raw = await callOpencodeCLI(systemPrompt, userQuery, String(model))
+        raw = await callOpencodeCLI(systemPrompt, userQuery, String(model), sessionId, sessionDir)
       } else if (provider === 'goose') {
-        raw = await callGooseCLI(systemPrompt, userQuery, String(model))
+        raw = await callGooseCLI(systemPrompt, userQuery, String(model), sessionId, sessionDir)
       } else if (provider === 'ollama-cli') {
-        raw = await callOllamaCLI(systemPrompt, userQuery, String(model))
+        raw = await callOllamaCLI(systemPrompt, userQuery, String(model), sessionId, sessionDir)
       } else {
         throw new Error(`Unsupported LLM provider: ${provider}`)
       }

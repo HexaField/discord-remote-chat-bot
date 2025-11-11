@@ -621,7 +621,9 @@ export default async function audioToDiagram(
       0.85,
       true,
       process.env.SDB_LLM_MODEL,
-      process.env.SDB_EMBEDDING_MODEL
+      process.env.SDB_EMBEDDING_MODEL,
+      undefined, // allow generateCausalRelationships to auto-generate sessionId
+      sourceDir // sessionDir for per-source persistence
     )
     if (cld.nodes.length === 0 || cld.relationships.length === 0) {
       throw new Error('Failed to extract any nodes or relationships')

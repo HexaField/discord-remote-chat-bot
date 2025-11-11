@@ -1,6 +1,8 @@
 import * as d3 from 'd3'
 import type { JSX } from 'solid-js'
 import { createEffect, createSignal, onCleanup, onMount } from 'solid-js'
+import { openTemporaryProgressEventSource } from '../lib/progressStream'
+import useVideoProgress from '../lib/useVideoProgress'
 
 type NodeDatum = d3.SimulationNodeDatum & { id: string; label?: string; type?: string; provenance?: any }
 
@@ -36,6 +38,11 @@ export default function GraphView(props: {
   const onRegenerated = props.onRegenerated
   const [hasTranscript, setHasTranscript] = createSignal(false)
   const [isCheckingTranscript, setIsCheckingTranscript] = createSignal(false)
+  // centralized per-video progress (SSE + fallback) hook
+  const { videoProgress, setVideoProgress, checkingVideoProgress, getProgressES } = useVideoProgress(
+    () => props.videoId,
+    () => props.universe
+  )
 
   // Check for transcript existence when there's no graph data so we can
   // present the Regenerate button to generate a graph from an existing
@@ -69,6 +76,18 @@ export default function GraphView(props: {
         setIsCheckingTranscript(false)
       }
     })()
+  })
+
+  // Hook manages SSE/fetch and cleanup. Keep a small effect so the component
+  // still reacts to changes in props.videoId/props.universe and we can clear
+  // local progress when no video is selected.
+  createEffect(() => {
+    const vid = videoId
+    if (!vid) {
+      setVideoProgress(null)
+      return
+    }
+    void vid
   })
   let container!: HTMLDivElement
   let svg!: SVGSVGElement
@@ -805,34 +824,48 @@ export default function GraphView(props: {
 
       <div class="absolute top-2 right-2 flex gap-2 z-30">
         {videoId && (hasTranscript() || (props.data && (props.data.nodes?.length ?? 0) === 0) || props.data) ? (
-          <button
-            disabled={isCheckingTranscript()}
-            class={
-              'px-2 py-1 text-sm bg-white border rounded shadow hover:bg-gray-50 ' +
-              (isCheckingTranscript() ? 'opacity-50 cursor-not-allowed' : '')
-            }
-            onClick={async () => {
-              if (!videoId) return
-              try {
-                const b = document.activeElement as HTMLElement // keep focus
-                // include optional universe query param
-                const u = props.universe ? `?universe=${encodeURIComponent(props.universe)}` : ''
-                // POST to trigger regeneration
-                await fetch(`/api/videos/${videoId}/regenerate${u}`, { method: 'POST' })
-                // fetch updated graph
-                const r = await fetch(`/api/videos/${videoId}/graph${u}`)
-                if (r.ok) {
-                  const json = await r.json()
-                  onRegenerated?.(json)
-                }
-                if (b) b.focus()
-              } catch (e) {
-                console.error('Regenerate failed', e)
+          <div class="flex items-center gap-2">
+            {videoProgress() ? (
+              <div class="text-sm text-gray-600">{videoProgress()!.status || 'Processing…'}</div>
+            ) : null}
+            <button
+              disabled={isCheckingTranscript() || Boolean(videoProgress())}
+              class={
+                'px-2 py-1 text-sm bg-white border rounded shadow hover:bg-gray-50 ' +
+                (isCheckingTranscript() || videoProgress() ? 'opacity-50 cursor-not-allowed' : '')
               }
-            }}
-          >
-            Regenerate
-          </button>
+              onClick={async () => {
+                if (!videoId) return
+                // ensure SSE is open so we don't miss initial progress events
+                try {
+                  if (!getProgressES()) {
+                    try {
+                      // open a temporary EventSource so we capture early progress events
+                      openTemporaryProgressEventSource(videoId, props.universe, (j) => setVideoProgress(j))
+                    } catch (e) {}
+                  }
+                } catch (e) {}
+                try {
+                  const b = document.activeElement as HTMLElement // keep focus
+                  // include optional universe query param
+                  const u = props.universe ? `?universe=${encodeURIComponent(props.universe)}` : ''
+                  // POST to trigger regeneration
+                  await fetch(`/api/videos/${videoId}/regenerate${u}`, { method: 'POST' })
+                  // fetch updated graph
+                  const r = await fetch(`/api/videos/${videoId}/graph${u}`)
+                  if (r.ok) {
+                    const json = await r.json()
+                    onRegenerated?.(json)
+                  }
+                  if (b) b.focus()
+                } catch (e) {
+                  console.error('Regenerate failed', e)
+                }
+              }}
+            >
+              Regenerate
+            </button>
+          </div>
         ) : null}
         <button class="px-2 py-1 text-sm bg-white border rounded shadow hover:bg-gray-50" onClick={zoomIn}>
           +

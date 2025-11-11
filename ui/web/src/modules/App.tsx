@@ -1,4 +1,6 @@
 import { createEffect, createSignal, For, onCleanup, onMount, Show } from 'solid-js'
+import { openTemporaryProgressEventSource } from '../lib/progressStream'
+import useVideoProgress from '../lib/useVideoProgress'
 import GraphView from './GraphView'
 import VideoCard from './VideoCard'
 
@@ -146,8 +148,11 @@ export default function App() {
   const [videoTranscriptExists, setVideoTranscriptExists] = createSignal<boolean | null>(null)
   const [checkingVideoTranscript, setCheckingVideoTranscript] = createSignal(false)
   const [regeneratingVideo, setRegeneratingVideo] = createSignal(false)
-  const [videoProgress, setVideoProgress] = createSignal<{ status?: string; updated?: number } | null>(null)
-  const [checkingVideoProgress, setCheckingVideoProgress] = createSignal(false)
+  // centralized per-video progress (SSE + fallback)
+  const { videoProgress, setVideoProgress, checkingVideoProgress, getProgressES } = useVideoProgress(
+    () => selected(),
+    () => selectedUniverse()
+  )
 
   async function loadUniverse() {
     setUniverseLoading(true)
@@ -392,54 +397,14 @@ export default function App() {
     }
   })
 
-  // Poll backend for per-video progress so UI can show realtime status (persisted by the server)
+  // Hook handles SSE/fetch; keep minimal effect so selection changes clear local progress
   createEffect(() => {
     const id = selected()
     if (!id || id === UNIVERSE_ID) {
       setVideoProgress(null)
-      setCheckingVideoProgress(false)
       return
     }
-
-    let cancelled = false
-    let timer: any = null
-
-    async function fetchProgress() {
-      setCheckingVideoProgress(true)
-      try {
-        const u = selectedUniverse()
-        const r = await fetch(`/api/videos/${id}/progress${u ? `?universe=${encodeURIComponent(u)}` : ''}`)
-        if (!r.ok) {
-          setVideoProgress(null)
-          return
-        }
-        const j = await r.json()
-        setVideoProgress(j)
-      } catch (e) {
-        setVideoProgress(null)
-      } finally {
-        setCheckingVideoProgress(false)
-      }
-    }
-
-    // initial fetch and then poll while a progress record exists or until graph appears
-    ;(async () => {
-      await fetchProgress()
-      if (cancelled) return
-      timer = setInterval(async () => {
-        // stop polling if graph exists and no progress
-        if (videoGraphExists() === true && !videoProgress()) {
-          clearInterval(timer)
-          return
-        }
-        await fetchProgress()
-      }, 2000)
-    })()
-
-    onCleanup(() => {
-      cancelled = true
-      if (timer) clearInterval(timer)
-    })
+    void id
   })
 
   return (
@@ -727,6 +692,20 @@ export default function App() {
                             disabled={regeneratingVideo() || Boolean(videoProgress())}
                             onClick={async () => {
                               try {
+                                // ensure SSE is open so we capture progress events
+                                try {
+                                  const id = selected()!
+                                  const u = selectedUniverse()
+                                  const qs = u ? `?universe=${encodeURIComponent(u)}` : ''
+                                  if (!getProgressES()) {
+                                    try {
+                                      openTemporaryProgressEventSource(id, selectedUniverse(), (j) =>
+                                        setVideoProgress(j)
+                                      )
+                                    } catch (e) {}
+                                  }
+                                } catch (e) {}
+
                                 setRegeneratingVideo(true)
                                 const id = selected()!
                                 const u = selectedUniverse()

@@ -5,3 +5,4 @@ csvs/
 package-lock.json
 .tmp*
 .DS_Store
+.sessions/

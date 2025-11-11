@@ -78,8 +78,15 @@ export async function generateCausalRelationships(
   threshold = 0.85,
   verbose = false,
   llmModel = mediumLLMModel,
-  embeddingModel = 'bge-m3:latest'
+  embeddingModel = 'bge-m3:latest',
+  sessionId?: string,
+  sessionDir?: string
 ) {
+  // Auto-create a session if none provided to ensure persistence
+  if (!sessionId) {
+    sessionId = `sess-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    debug('Generated new sessionId for causal relationship generation:', sessionId)
+  }
   onProgress(`Generating Causal Relationships: Summarising ${sentences.length} sentences...`)
   // Generate a short topic summary: ask the LLM to produce a few short sentences about
   // the overall topic of the provided transcript. We join those sentences into a
@@ -142,7 +149,11 @@ export async function generateCausalRelationships(
   const filteredJoined = filteredSentences.join('\n')
 
   // Step 1 (per section)
-  const resp1 = await callLLM(systemPrompt, filteredJoined, 'opencode', 'github-copilot/gpt-5-mini')
+  // Use session only for opencode provider calls to maintain cross-call context.
+  const resp1 = await callLLM(systemPrompt, filteredJoined, 'opencode', 'github-copilot/gpt-5-mini', {
+    sessionId: sessionId,
+    sessionDir: sessionDir
+  })
   if (!resp1.success || !resp1.data) {
     throw new Error('Failed to call LLM for causal relationship extraction')
   }
@@ -218,7 +229,9 @@ export async function generateCausalRelationships(
     threshold,
     llmModel,
     filteredSentences.join('\n'),
-    entries
+    entries,
+    sessionId,
+    sessionDir
   )
 
   console.log('Checked from', entries.length, 'to', checked.length, 'relationships')
@@ -313,7 +326,11 @@ Return ONLY a single JSON object mapping the variable name to one of the strings
     const promptBody = nodeList.join('\n') + '\n\nContext:\n' + (textContext || '')
     try {
       onProgress(`Classifying ${nodeList.length} nodes...`)
-      const resp = await callLLM(sys, promptBody, 'opencode', 'github-copilot/gpt-5-mini')
+      const resp = await callLLM(sys, promptBody, 'opencode', 'github-copilot/gpt-5-mini', {
+        sessionId: sessionId,
+        sessionDir: sessionDir
+      })
+      debug('Node classification LLM response:', resp?.success)
       if (resp && resp.success && resp.data) {
         const parsed = loadJson(String(resp.data))
         if (parsed && typeof parsed === 'object') {
@@ -341,6 +358,7 @@ Return ONLY a single JSON object mapping the variable name to one of the strings
   }
 
   const nodeTypes = await classifyNodes(nodes, filteredSentences.join('\n'))
+  debug('Classified node types:', nodeTypes)
 
   // Convert nodes to objects with types
   const nodesWithTypes: Node[] = nodes.map((n) => ({ label: n, type: nodeTypes[n] || 'other' }))
@@ -479,7 +497,9 @@ async function checkVariables(
   threshold: number,
   llmModel: string,
   text: string,
-  entries: RelationshipEntry[]
+  entries: RelationshipEntry[],
+  sessionId?: string,
+  sessionDir?: string
 ) {
   // collect variables from structured entries
   const variable_set = new Set<string>()
@@ -503,7 +523,10 @@ async function checkVariables(
   const prompt = `You will receive a list of relationship objects and groups of similar variables to merge.\nRelationships:\n${JSON.stringify(
     entries
   )}\nSimilar Variables (pairs/groups to merge):\n${JSON.stringify(similar_variables)}\nPlease return a single JSON object mapping ordinal keys (\"1\", \"2\", ...) to entries with subject/predicate/object/reasoning/relevant text.`
-  const resp = await callLLM(mergeSystem, prompt, 'opencode', 'github-copilot/gpt-5-mini')
+  const resp = await callLLM(mergeSystem, prompt, 'opencode', 'github-copilot/gpt-5-mini', {
+    sessionId: sessionId,
+    sessionDir: sessionDir
+  })
   if (!resp.success || !resp.data) throw new Error('LLM failed while merging similar variables')
   const parsed = loadJson(resp.data)
   if (!parsed) throw new Error('Got no corrected response from the assistant')

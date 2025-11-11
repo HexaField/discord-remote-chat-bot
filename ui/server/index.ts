@@ -4,7 +4,6 @@ import fs from 'fs'
 import multer from 'multer'
 import path from 'path'
 import audioToDiagram from '../../src/audioToDiagram'
-import { generateCausalRelationships } from '../../src/cld'
 import { convertToMp3, ensureFfmpegAvailable } from '../../src/ffmpeg'
 
 const app = express()
@@ -267,22 +266,51 @@ app.post('/api/videos/:id/regenerate', async (req: Request, res: Response) => {
     }
 
     try {
-      const cld = await generateCausalRelationships(
-        transcripts,
-        notify,
-        0.85,
-        true,
-        process.env.SDB_LLM_MODEL,
-        process.env.SDB_EMBEDDING_MODEL
-      )
+      // Prefer re-running the full pipeline so all artifacts (vtt, transcript,
+      // graph) are recreated. Try to pick a sensible source file from the
+      // existing folder: audio.mp3, transcript.fathom.txt, audio.vtt, or
+      // transcript.json. If none exists, fall back to the in-memory CLD
+      // generator using the parsed `transcripts` array.
+      let sourceUrl: string | undefined
+      const audioPath = path.join(dir, 'audio.mp3')
+      const fathomPath = path.join(dir, 'transcript.fathom.txt')
+      const vttPath = path.join(dir, 'audio.vtt')
+      const transcriptJsonPath = item.transcriptPath ? item.transcriptPath : path.join(dir, 'transcript.json')
 
-      // write graph.json
-      const out = { nodes: cld.nodes, relationships: cld.relationships }
-      fs.writeFileSync(graphPath, JSON.stringify(out, null, 2), 'utf8')
+      if (fs.existsSync(audioPath)) sourceUrl = `file://${audioPath}`
+      else if (fs.existsSync(fathomPath)) sourceUrl = `file://${fathomPath}`
+      else if (fs.existsSync(vttPath)) sourceUrl = `file://${vttPath}`
+      else if (item.transcriptPath && fs.existsSync(item.transcriptPath)) sourceUrl = `file://${item.transcriptPath}`
 
-      // done
-      persistProgress('Done')
-      return res.json(out)
+      if (sourceUrl) {
+        persistProgress('Starting full pipeline (audioToDiagram) ...')
+        // audioToDiagram returns an object with `dir` where it wrote outputs.
+        const out = await audioToDiagram(sourceUrl, notify, true)
+        // If the pipeline produced a graph.json in its output dir, copy it
+        // back into the current video directory so the UI will pick up the
+        // updated graph in-place.
+        try {
+          if (out && out.dir) {
+            const generatedGraph = path.join(out.dir, 'graph.json')
+            if (fs.existsSync(generatedGraph)) {
+              fs.copyFileSync(generatedGraph, graphPath)
+              const raw = JSON.parse(fs.readFileSync(graphPath, 'utf8'))
+              persistProgress('Done')
+              return res.json(raw)
+            }
+          }
+        } catch (e) {
+          // fall through to attempt CLD fallback or error below
+          console.error('[regenerate] copying generated graph failed', e)
+        }
+        // If we reach here, audioToDiagram ran but no graph was found to copy.
+        // Return a generic success message and let the client refresh graph
+        // via the normal /api/videos/:id/graph route.
+        persistProgress('Done')
+        return res.json({ status: 'ok' })
+      } else {
+        throw new Error('No source audio or transcript file found for regeneration')
+      }
     } catch (err: any) {
       persistProgress('Failed: ' + String(err?.message || err))
       console.error('[regenerate] failed', err)
@@ -313,6 +341,162 @@ app.get('/api/videos/:id/progress', (req: Request, res: Response) => {
     }
   } catch (e) {
     return res.status(500).json({ error: 'Failed to read progress' })
+  }
+})
+
+// Server-Sent Events stream for per-video progress. Clients can open a
+// persistent connection to receive updates whenever progress.json changes.
+app.get('/api/videos/:id/progress/stream', (req: Request, res: Response) => {
+  const { id } = req.params
+  const universe = typeof req.query.universe === 'string' ? req.query.universe : undefined
+  const item = readItems(universe).find((v) => v.id === id)
+  if (!item) return res.status(404).json({ error: 'Not found' })
+  try {
+    const dir = path.join(DATA_ROOT, item.universe ?? '', id)
+    const progressPath = path.join(dir, 'progress.json')
+
+    // Set SSE headers
+    res.setHeader('Content-Type', 'text/event-stream')
+    res.setHeader('Cache-Control', 'no-cache')
+    res.setHeader('Connection', 'keep-alive')
+    // allow CORS preflight to succeed
+    res.flushHeaders && res.flushHeaders()
+
+    let lastUpdated = 0
+
+    // send helper
+    const send = (obj: any) => {
+      try {
+        res.write(`data: ${JSON.stringify(obj)}\n\n`)
+      } catch (e) {}
+    }
+
+    // send initial state if present
+    if (fs.existsSync(progressPath)) {
+      try {
+        const raw = fs.readFileSync(progressPath, 'utf8')
+        const parsed = JSON.parse(raw)
+        lastUpdated = parsed?.updated ?? fs.statSync(progressPath).mtimeMs
+        send(parsed)
+      } catch (e) {
+        // ignore parse errors
+      }
+    }
+
+    // Use fs.watch on the directory for event-driven updates. Fall back to a
+    // polling checker if fs.watch isn't available or fails to initialize.
+    let watcher: fs.FSWatcher | null = null
+    let checker: NodeJS.Timeout | null = null
+
+    const startPoller = () => {
+      checker = setInterval(() => {
+        try {
+          if (fs.existsSync(progressPath)) {
+            const raw = fs.readFileSync(progressPath, 'utf8')
+            try {
+              const parsed = JSON.parse(raw)
+              const updated = parsed?.updated ?? fs.statSync(progressPath).mtimeMs
+              if (updated !== lastUpdated) {
+                lastUpdated = updated
+                send(parsed)
+                // if status is Done or Failed, cleanup and close
+                const st = (parsed?.status || '').toString().toLowerCase()
+                if (st.startsWith('done') || st.startsWith('failed')) {
+                  try {
+                    fs.unlinkSync(progressPath)
+                  } catch (e) {}
+                  try {
+                    res.end()
+                  } catch (e) {}
+                }
+              }
+            } catch (e) {
+              const updated = fs.statSync(progressPath).mtimeMs
+              if (updated !== lastUpdated) {
+                lastUpdated = updated
+                send({ status: raw, updated })
+              }
+            }
+          } else {
+            if (lastUpdated !== 0) {
+              lastUpdated = 0
+              send({ status: 'not-found', updated: 0 })
+            }
+          }
+        } catch (e) {
+          // swallow errors
+        }
+      }, 1000)
+    }
+
+    try {
+      watcher = fs.watch(dir, { persistent: true }, (evt, fname) => {
+        try {
+          // if filename omitted, react by checking progressPath
+          if (fname && path.basename(fname) !== path.basename(progressPath)) return
+          if (!fs.existsSync(progressPath)) {
+            if (lastUpdated !== 0) {
+              lastUpdated = 0
+              send({ status: 'not-found', updated: 0 })
+            }
+            return
+          }
+          const raw = fs.readFileSync(progressPath, 'utf8')
+          try {
+            const parsed = JSON.parse(raw)
+            const updated = parsed?.updated ?? fs.statSync(progressPath).mtimeMs
+            if (updated !== lastUpdated) {
+              lastUpdated = updated
+              send(parsed)
+              const st = (parsed?.status || '').toString().toLowerCase()
+              if (st.startsWith('done') || st.startsWith('failed')) {
+                // cleanup and close
+                try {
+                  fs.unlinkSync(progressPath)
+                } catch (e) {}
+                try {
+                  watcher && watcher.close()
+                } catch (e) {}
+                try {
+                  res.end()
+                } catch (e) {}
+              }
+            }
+          } catch (e) {
+            const updated = fs.statSync(progressPath).mtimeMs
+            if (updated !== lastUpdated) {
+              lastUpdated = updated
+              send({ status: raw, updated })
+            }
+          }
+        } catch (e) {
+          // ignore
+        }
+      })
+    } catch (e) {
+      // fallback to poller
+      startPoller()
+    }
+
+    // heartbeat to keep proxies from closing connection
+    const heartbeat = setInterval(() => {
+      try {
+        res.write(': heartbeat\n\n')
+      } catch (e) {}
+    }, 15000)
+
+    req.on('close', () => {
+      try {
+        watcher && watcher.close()
+      } catch (e) {}
+      if (checker) clearInterval(checker)
+      clearInterval(heartbeat)
+      try {
+        res.end()
+      } catch (e) {}
+    })
+  } catch (e) {
+    return res.status(500).json({ error: 'Failed to open progress stream' })
   }
 })
 

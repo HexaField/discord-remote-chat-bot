@@ -5,7 +5,8 @@ export const DEV_LOG =
   !!process.env.TEST
 
 export function debug(...args: unknown[]) {
-  if (DEV_LOG) console.debug('[debug]', ...args)
+  // if (DEV_LOG)
+  console.debug('[debug]', ...args)
 }
 
 export function info(...args: unknown[]) {
