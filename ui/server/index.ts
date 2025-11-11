@@ -5,6 +5,7 @@ import multer from 'multer'
 import path from 'path'
 import audioToDiagram from '../../src/audioToDiagram'
 import { generateCausalRelationships } from '../../src/cld'
+import { convertToMp3, ensureFfmpegAvailable } from '../../src/ffmpeg'
 
 const app = express()
 app.use(cors())
@@ -243,26 +244,75 @@ app.post('/api/videos/:id/regenerate', async (req: Request, res: Response) => {
     }
 
     // run generator
-    const notify = (m: string) => console.log('[regen]', m)
-    const cld = await generateCausalRelationships(
-      transcripts,
-      notify,
-      0.85,
-      true,
-      process.env.SDB_LLM_MODEL,
-      process.env.SDB_EMBEDDING_MODEL
-    )
-
-    // write graph.json
     const dir = path.join(DATA_ROOT, item.universe ?? '', id)
     const graphPath = path.join(dir, 'graph.json')
-    const out = { nodes: cld.nodes, relationships: cld.relationships }
-    fs.writeFileSync(graphPath, JSON.stringify(out, null, 2), 'utf8')
+    const progressPath = path.join(dir, 'progress.json')
 
-    return res.json(out)
+    function persistProgress(msg: string) {
+      try {
+        const out = { status: msg, updated: Date.now() }
+        fs.writeFileSync(progressPath, JSON.stringify(out, null, 2), 'utf8')
+      } catch (e) {
+        console.error('Failed to write progress.json', e)
+      }
+    }
+
+    // mark start
+    persistProgress('Starting regeneration…')
+    const notify = (m: string) => {
+      try {
+        persistProgress(m)
+      } catch (e) {}
+      console.log('[regen]', m)
+    }
+
+    try {
+      const cld = await generateCausalRelationships(
+        transcripts,
+        notify,
+        0.85,
+        true,
+        process.env.SDB_LLM_MODEL,
+        process.env.SDB_EMBEDDING_MODEL
+      )
+
+      // write graph.json
+      const out = { nodes: cld.nodes, relationships: cld.relationships }
+      fs.writeFileSync(graphPath, JSON.stringify(out, null, 2), 'utf8')
+
+      // done
+      persistProgress('Done')
+      return res.json(out)
+    } catch (err: any) {
+      persistProgress('Failed: ' + String(err?.message || err))
+      console.error('[regenerate] failed', err)
+      return res.status(500).json({ error: String(err?.message || err) })
+    }
   } catch (e: any) {
     console.error('[regenerate] failed', e)
     return res.status(500).json({ error: String(e?.message || e) })
+  }
+})
+
+// Return per-video progress persisted at DATA_ROOT/<universe>?/<id>/progress.json
+app.get('/api/videos/:id/progress', (req: Request, res: Response) => {
+  const { id } = req.params
+  const universe = typeof req.query.universe === 'string' ? req.query.universe : undefined
+  const item = readItems(universe).find((v) => v.id === id)
+  if (!item) return res.status(404).json({ error: 'Not found' })
+  try {
+    const dir = path.join(DATA_ROOT, item.universe ?? '', id)
+    const progressPath = path.join(dir, 'progress.json')
+    if (!fs.existsSync(progressPath)) return res.status(404).json({ error: 'Not found' })
+    const raw = fs.readFileSync(progressPath, 'utf8')
+    try {
+      const parsed = JSON.parse(raw)
+      return res.json(parsed)
+    } catch (e) {
+      return res.status(200).json({ status: raw, updated: fs.statSync(progressPath).mtimeMs })
+    }
+  } catch (e) {
+    return res.status(500).json({ error: 'Failed to read progress' })
   }
 })
 
@@ -307,11 +357,19 @@ app.post('/api/videos/import', upload.array('files'), async (req: Request, res: 
             const fileUrl = `file://${dest}`
             await audioToDiagram(fileUrl, notify, true)
           } else {
-            // write uploaded file to expected audio filename so audioToDiagram will pick it up
-            const dest = path.join(dir, `audio.mp3`)
-            fs.writeFileSync(dest, f.buffer)
+            // preserve original file extension (fallback to .mp3)
+            const originalExt = path.extname(base) || '.mp3'
+            const ext = /^\.[a-z0-9]+$/i.test(originalExt) ? originalExt : '.mp3'
+            const fileOriginal = path.join(dir, `audio${ext}`)
+            fs.writeFileSync(fileOriginal, f.buffer)
+            const output = path.join(dir, `audio.mp3`)
+            if (ext.toLowerCase() !== '.mp3') {
+              // run ffmpeg to convert to mp3
+              await ensureFfmpegAvailable()
+              await convertToMp3(fileOriginal, output)
+            }
             // run full pipeline using file:// URL to the saved file
-            const fileUrl = `file://${dest}`
+            const fileUrl = `file://${output}`
             await audioToDiagram(fileUrl, notify, true)
           }
           results.push({ file: f.originalname, id, status: 'ok', universe })

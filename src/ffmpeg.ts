@@ -8,8 +8,8 @@ function escapePath(p: string) {
   return `"${p.replace(/"/g, '\\"')}"`
 }
 
-export async function convertTo16kMonoWav(inputPath: string, outputPath: string) {
-  const cmd = `ffmpeg -y -i ${escapePath(inputPath)} -ar 16000 -ac 1 -c:a pcm_s16le ${escapePath(outputPath)}`
+export async function convertToMp3(inputPath: string, outputPath: string) {
+  const cmd = `ffmpeg -y -i ${escapePath(inputPath)} -ar 16000 -ac 1 -c:a libmp3lame -b:a 128k ${escapePath(outputPath)}`
   // Increase buffer in case ffmpeg emits a lot
   await exec(cmd, { maxBuffer: 20 * 1024 * 1024 })
 }

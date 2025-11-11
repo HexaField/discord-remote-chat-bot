@@ -143,6 +143,11 @@ export default function App() {
   const [universeLoading, setUniverseLoading] = createSignal(false)
   const [videoGraphExists, setVideoGraphExists] = createSignal<boolean | null>(null)
   const [videoGraphLoading, setVideoGraphLoading] = createSignal(false)
+  const [videoTranscriptExists, setVideoTranscriptExists] = createSignal<boolean | null>(null)
+  const [checkingVideoTranscript, setCheckingVideoTranscript] = createSignal(false)
+  const [regeneratingVideo, setRegeneratingVideo] = createSignal(false)
+  const [videoProgress, setVideoProgress] = createSignal<{ status?: string; updated?: number } | null>(null)
+  const [checkingVideoProgress, setCheckingVideoProgress] = createSignal(false)
 
   async function loadUniverse() {
     setUniverseLoading(true)
@@ -350,6 +355,91 @@ export default function App() {
         setVideoGraphLoading(false)
       }
     })()
+  })
+
+  // When graph is missing for a selected video, check whether a transcript
+  // exists so we can offer a Regenerate button in the No Graph UI.
+  createEffect(() => {
+    const id = selected()
+    if (!id || id === UNIVERSE_ID) {
+      setVideoTranscriptExists(null)
+      setCheckingVideoTranscript(false)
+      return
+    }
+    // only check when graph is absent
+    if (videoGraphExists() === false) {
+      ;(async () => {
+        setCheckingVideoTranscript(true)
+        try {
+          const u = selectedUniverse()
+          const r = await fetch(`/api/videos/${id}/transcript${u ? `?universe=${encodeURIComponent(u)}` : ''}`)
+          if (!r.ok) {
+            setVideoTranscriptExists(false)
+            return
+          }
+          const j = await r.json()
+          const ok = Array.isArray(j) ? j.length > 0 : Boolean(j && Object.keys(j).length > 0)
+          setVideoTranscriptExists(ok)
+        } catch (e) {
+          setVideoTranscriptExists(false)
+        } finally {
+          setCheckingVideoTranscript(false)
+        }
+      })()
+    } else {
+      setVideoTranscriptExists(null)
+      setCheckingVideoTranscript(false)
+    }
+  })
+
+  // Poll backend for per-video progress so UI can show realtime status (persisted by the server)
+  createEffect(() => {
+    const id = selected()
+    if (!id || id === UNIVERSE_ID) {
+      setVideoProgress(null)
+      setCheckingVideoProgress(false)
+      return
+    }
+
+    let cancelled = false
+    let timer: any = null
+
+    async function fetchProgress() {
+      setCheckingVideoProgress(true)
+      try {
+        const u = selectedUniverse()
+        const r = await fetch(`/api/videos/${id}/progress${u ? `?universe=${encodeURIComponent(u)}` : ''}`)
+        if (!r.ok) {
+          setVideoProgress(null)
+          return
+        }
+        const j = await r.json()
+        setVideoProgress(j)
+      } catch (e) {
+        setVideoProgress(null)
+      } finally {
+        setCheckingVideoProgress(false)
+      }
+    }
+
+    // initial fetch and then poll while a progress record exists or until graph appears
+    ;(async () => {
+      await fetchProgress()
+      if (cancelled) return
+      timer = setInterval(async () => {
+        // stop polling if graph exists and no progress
+        if (videoGraphExists() === true && !videoProgress()) {
+          clearInterval(timer)
+          return
+        }
+        await fetchProgress()
+      }, 2000)
+    })()
+
+    onCleanup(() => {
+      cancelled = true
+      if (timer) clearInterval(timer)
+    })
   })
 
   return (
@@ -620,8 +710,58 @@ export default function App() {
                     Loading…
                   </div>
                 ) : videoGraphExists() === false ? (
-                  <div class="h-full border rounded bg-white flex items-center justify-center text-gray-500">
-                    No Graph
+                  <div class="h-full border rounded bg-white flex flex-col items-center justify-center text-gray-500 gap-3 p-4">
+                    <div>No Graph</div>
+                    {checkingVideoTranscript() ? (
+                      <div class="text-sm text-gray-400">Checking transcript…</div>
+                    ) : videoTranscriptExists() ? (
+                      <div class="flex flex-col items-center gap-2">
+                        {videoProgress() ? (
+                          <div class="text-sm text-gray-600">{videoProgress()!.status || 'Processing…'}</div>
+                        ) : null}
+                        <div class="flex gap-2">
+                          <button
+                            class={`px-3 py-1 bg-white border rounded shadow hover:bg-gray-50 ${
+                              videoProgress() ? 'opacity-50 cursor-not-allowed' : ''
+                            }`}
+                            disabled={regeneratingVideo() || Boolean(videoProgress())}
+                            onClick={async () => {
+                              try {
+                                setRegeneratingVideo(true)
+                                const id = selected()!
+                                const u = selectedUniverse()
+                                await fetch(
+                                  `/api/videos/${id}/regenerate${u ? `?universe=${encodeURIComponent(u)}` : ''}`,
+                                  {
+                                    method: 'POST'
+                                  }
+                                )
+                                // re-check graph after regeneration
+                                setVideoGraphLoading(true)
+                                const r = await fetch(
+                                  `/api/videos/${id}/graph${u ? `?universe=${encodeURIComponent(u)}` : ''}`
+                                )
+                                if (r.ok) {
+                                  const j = await r.json()
+                                  const hasNodes = Array.isArray(j.nodes) && j.nodes.length > 0
+                                  const hasLinks = Array.isArray(j.links) && j.links.length > 0
+                                  setVideoGraphExists(hasNodes || hasLinks)
+                                }
+                              } catch (e) {
+                                console.error('Regenerate failed', e)
+                              } finally {
+                                setRegeneratingVideo(false)
+                                setVideoGraphLoading(false)
+                              }
+                            }}
+                          >
+                            {regeneratingVideo() ? 'Generating…' : 'Regenerate from transcript'}
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div class="text-sm text-gray-400">No transcript available</div>
+                    )}
                   </div>
                 ) : (
                   <VideoCard id={selected()!} universe={selectedUniverse()} />

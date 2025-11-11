@@ -13,7 +13,7 @@ import { ensureWhisperAvailable, transcribeWithWhisper } from './whisper'
 
 const TMP_DIR = path.resolve(appRootPath.path, '.tmp/audio-to-diagram')
 
-async function existsNonEmpty(p: string) {
+async function fileExists(p: string) {
   try {
     const stat = await fsp.stat(p)
     console.log(`File ${p} exists:`, stat.isFile() && stat.size > 0)
@@ -515,9 +515,9 @@ export default async function audioToDiagram(
     await ensureFfmpegAvailable()
     await ensureWhisperAvailable()
 
-    if (!(await existsNonEmpty(audioPath))) {
+    if (!(await fileExists(audioPath))) {
       // Download strictly using chapter splitting for YouTube; for direct audio URLs, download as-is
-      await notify('Downloading audio (chapters if available)…')
+      await notify(`Downloading audio ${audioPath}...`)
       if (audioURL.includes('youtube.com') || audioURL.includes('youtu.be')) {
         // Download a single file + info.json, then transcribe once and split by chapters
         await downloadYoutubeSingleWithInfo(audioURL, sourceDir, audioFormat)
@@ -529,13 +529,13 @@ export default async function audioToDiagram(
     // Transcribe whole file to VTT (timestamps) so we can split per chapter
     const outBase = path.join(sourceDir, 'audio')
     const WHISPER_MODEL = process.env.WHISPER_MODEL || path.join(os.homedir(), 'models/ggml-base.en.bin')
-    if (!(await existsNonEmpty(transcriptPath))) {
+    if (!(await fileExists(transcriptPath))) {
       await transcribeWithWhisper(WHISPER_MODEL, audioPath, transcriptPath, outBase)
     }
   }
   // Read VTT content and try to extract either NOTE Chapter ranges (yt-dlp style)
   // or individual cue blocks. We want each timestamped section as its own transcript.
-  const vttContent = (await existsNonEmpty(path.join(sourceDir, `audio.vtt`)))
+  const vttContent = (await fileExists(path.join(sourceDir, `audio.vtt`)))
     ? await fsp.readFile(path.join(sourceDir, `audio.vtt`), 'utf8')
     : ''
 
@@ -596,7 +596,7 @@ export default async function audioToDiagram(
   let relationships: Relationship[] = []
   let statements: string[] = []
   let loadedFromGraph = false
-  if ((await existsNonEmpty(graphJSONPath)) && !force) {
+  if ((await fileExists(graphJSONPath)) && !force) {
     try {
       await notify('Loading existing graph data…')
       const parsed = await loadGraphJSON(sourceDir)
@@ -689,7 +689,7 @@ export default async function audioToDiagram(
 
   // Export graph JSON if missing or empty
   try {
-    const needGraph = !((await existsNonEmpty(graphJSONPath)) && !force)
+    const needGraph = !((await fileExists(graphJSONPath)) && !force)
     if (needGraph) {
       info('Writing graph JSON for', baseName)
       await notify('Writing graph data…')
@@ -723,9 +723,9 @@ export default async function audioToDiagram(
   if (graphType === 'mermaid') {
     // Export Mermaid if missing
     try {
-      const needMDD = !(await existsNonEmpty(mermaidMDD))
-      const needSVG = !(await existsNonEmpty(mermaidSVG))
-      const needPNG = !(await existsNonEmpty(mermaidPNG))
+      const needMDD = !(await fileExists(mermaidMDD))
+      const needSVG = !(await fileExists(mermaidSVG))
+      const needPNG = !(await fileExists(mermaidPNG))
       if (needMDD || needSVG || needPNG || force) {
         info('Writing mermaid artifacts for', baseName)
         await notify('Rendering diagram (Mermaid)…')

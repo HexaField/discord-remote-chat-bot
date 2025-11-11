@@ -1,6 +1,6 @@
 import * as d3 from 'd3'
 import type { JSX } from 'solid-js'
-import { createEffect, onCleanup, onMount } from 'solid-js'
+import { createEffect, createSignal, onCleanup, onMount } from 'solid-js'
 
 type NodeDatum = d3.SimulationNodeDatum & { id: string; label?: string; type?: string; provenance?: any }
 
@@ -34,6 +34,42 @@ export default function GraphView(props: {
 }): JSX.Element {
   const videoId = props.videoId
   const onRegenerated = props.onRegenerated
+  const [hasTranscript, setHasTranscript] = createSignal(false)
+  const [isCheckingTranscript, setIsCheckingTranscript] = createSignal(false)
+
+  // Check for transcript existence when there's no graph data so we can
+  // present the Regenerate button to generate a graph from an existing
+  // transcript. We re-check when videoId or universe or data changes.
+  createEffect(() => {
+    const vid = videoId
+    if (!vid) {
+      setHasTranscript(false)
+      return
+    }
+    // if we already have graph data with nodes, no need to fetch transcript
+    if (props.data && (props.data.nodes?.length ?? 0) > 0) {
+      setHasTranscript(false)
+      return
+    }
+    ;(async () => {
+      setIsCheckingTranscript(true)
+      try {
+        const u = props.universe ? `?universe=${encodeURIComponent(props.universe)}` : ''
+        const r = await fetch(`/api/videos/${vid}/transcript${u}`)
+        if (!r.ok) {
+          setHasTranscript(false)
+          return
+        }
+        const json = await r.json()
+        const ok = Array.isArray(json) ? json.length > 0 : Boolean(json && Object.keys(json).length > 0)
+        setHasTranscript(ok)
+      } catch (e) {
+        setHasTranscript(false)
+      } finally {
+        setIsCheckingTranscript(false)
+      }
+    })()
+  })
   let container!: HTMLDivElement
   let svg!: SVGSVGElement
   let sim: d3.Simulation<NodeDatum, LinkDatum> | null = null
@@ -174,8 +210,8 @@ export default function GraphView(props: {
       const sids: string[] = Array.isArray((n as any).__sourceIds)
         ? (n as any).__sourceIds
         : Array.isArray(n.provenance)
-        ? (n.provenance as any[]).map((p) => p?.source || p?.sourceId || p?.id).filter(Boolean)
-        : []
+          ? (n.provenance as any[]).map((p) => p?.source || p?.sourceId || p?.id).filter(Boolean)
+          : []
       const primary = sids && sids.length ? sids[0] : null
       nodePrimarySource.set(n.id, primary)
       if (primary && !sourceList.includes(primary)) sourceList.push(primary)
@@ -191,7 +227,8 @@ export default function GraphView(props: {
       }
     }
 
-    sim = d3.forceSimulation<NodeDatum>(nodes)
+    sim = d3
+      .forceSimulation<NodeDatum>(nodes)
       .force(
         'link',
         d3
@@ -214,17 +251,23 @@ export default function GraphView(props: {
       // primary source will be attracted to the center
       .force(
         'sourceX',
-        d3.forceX<NodeDatum>().x((d: any) => {
-          const ps = nodePrimarySource.get(d.id)
-          return ps && sourceCenters.has(ps) ? (sourceCenters.get(ps) as any).x : w / 2
-        }).strength((d: any) => (nodePrimarySource.get(d.id) ? 0.6 : 0.02))
+        d3
+          .forceX<NodeDatum>()
+          .x((d: any) => {
+            const ps = nodePrimarySource.get(d.id)
+            return ps && sourceCenters.has(ps) ? (sourceCenters.get(ps) as any).x : w / 2
+          })
+          .strength((d: any) => (nodePrimarySource.get(d.id) ? 0.6 : 0.02))
       )
       .force(
         'sourceY',
-        d3.forceY<NodeDatum>().y((d: any) => {
-          const ps = nodePrimarySource.get(d.id)
-          return ps && sourceCenters.has(ps) ? (sourceCenters.get(ps) as any).y : h / 2
-        }).strength((d: any) => (nodePrimarySource.get(d.id) ? 0.6 : 0.02))
+        d3
+          .forceY<NodeDatum>()
+          .y((d: any) => {
+            const ps = nodePrimarySource.get(d.id)
+            return ps && sourceCenters.has(ps) ? (sourceCenters.get(ps) as any).y : h / 2
+          })
+          .strength((d: any) => (nodePrimarySource.get(d.id) ? 0.6 : 0.02))
       )
       .force(
         'collide',
@@ -568,12 +611,7 @@ export default function GraphView(props: {
           labelsAll.each(function (d: any) {
             const col = props.sourcePalette ? props.sourcePalette[d.id] || '#666' : '#666'
             const cent = (d as any).__centroid || (d.points && d.points[0]) || [0, 0]
-            d3.select(this)
-              .attr('x', cent[0])
-              .attr('y', cent[1])
-              .text(d.id)
-              .attr('fill', col)
-              .attr('opacity', 0.95)
+            d3.select(this).attr('x', cent[0]).attr('y', cent[1]).text(d.id).attr('fill', col).attr('opacity', 0.95)
           })
         } catch (e) {
           // ignore label rendering errors
@@ -765,31 +803,37 @@ export default function GraphView(props: {
         </div>
       )}
 
-      <div class="absolute top-2 right-2 flex gap-2 z-10">
-        <button
-          class="px-2 py-1 text-sm bg-white border rounded shadow hover:bg-gray-50"
-          onClick={async () => {
-            if (!videoId) return
-            try {
-              const b = document.activeElement as HTMLElement // keep focus
-              // include optional universe query param
-              const u = props.universe ? `?universe=${encodeURIComponent(props.universe)}` : ''
-              // POST to trigger regeneration
-              await fetch(`/api/videos/${videoId}/regenerate${u}`, { method: 'POST' })
-              // fetch updated graph
-              const r = await fetch(`/api/videos/${videoId}/graph${u}`)
-              if (r.ok) {
-                const json = await r.json()
-                onRegenerated?.(json)
-              }
-              if (b) b.focus()
-            } catch (e) {
-              console.error('Regenerate failed', e)
+      <div class="absolute top-2 right-2 flex gap-2 z-30">
+        {videoId && (hasTranscript() || (props.data && (props.data.nodes?.length ?? 0) === 0) || props.data) ? (
+          <button
+            disabled={isCheckingTranscript()}
+            class={
+              'px-2 py-1 text-sm bg-white border rounded shadow hover:bg-gray-50 ' +
+              (isCheckingTranscript() ? 'opacity-50 cursor-not-allowed' : '')
             }
-          }}
-        >
-          Regenerate
-        </button>
+            onClick={async () => {
+              if (!videoId) return
+              try {
+                const b = document.activeElement as HTMLElement // keep focus
+                // include optional universe query param
+                const u = props.universe ? `?universe=${encodeURIComponent(props.universe)}` : ''
+                // POST to trigger regeneration
+                await fetch(`/api/videos/${videoId}/regenerate${u}`, { method: 'POST' })
+                // fetch updated graph
+                const r = await fetch(`/api/videos/${videoId}/graph${u}`)
+                if (r.ok) {
+                  const json = await r.json()
+                  onRegenerated?.(json)
+                }
+                if (b) b.focus()
+              } catch (e) {
+                console.error('Regenerate failed', e)
+              }
+            }}
+          >
+            Regenerate
+          </button>
+        ) : null}
         <button class="px-2 py-1 text-sm bg-white border rounded shadow hover:bg-gray-50" onClick={zoomIn}>
           +
         </button>
