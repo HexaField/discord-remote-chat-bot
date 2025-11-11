@@ -17,9 +17,7 @@ const DATA_ROOT = path.resolve(process.cwd(), '.tmp', 'audio-to-diagram')
 
 function listUniverses() {
   if (!fs.existsSync(DATA_ROOT)) return []
-  return fs
-    .readdirSync(DATA_ROOT)
-    .filter((d) => fs.statSync(path.join(DATA_ROOT, d)).isDirectory())
+  return fs.readdirSync(DATA_ROOT).filter((d) => fs.statSync(path.join(DATA_ROOT, d)).isDirectory())
 }
 
 interface VideoItem {
@@ -85,7 +83,9 @@ app.get('/api/universes', (_req: Request, res: Response) => {
 app.post('/api/universes', (req: Request, res: Response) => {
   const name = (req.body && req.body.name) || req.query.name
   if (!name || typeof name !== 'string') return res.status(400).json({ error: 'Missing name' })
-  const safe = String(name).replace(/[^a-zA-Z0-9-_]/g, '-').slice(0, 64)
+  const safe = String(name)
+    .replace(/[^a-zA-Z0-9-_]/g, '-')
+    .slice(0, 64)
   const dir = path.join(DATA_ROOT, safe)
   try {
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
@@ -254,7 +254,7 @@ app.post('/api/videos/:id/regenerate', async (req: Request, res: Response) => {
     )
 
     // write graph.json
-  const dir = path.join(DATA_ROOT, item.universe ?? '', id)
+    const dir = path.join(DATA_ROOT, item.universe ?? '', id)
     const graphPath = path.join(dir, 'graph.json')
     const out = { nodes: cld.nodes, relationships: cld.relationships }
     fs.writeFileSync(graphPath, JSON.stringify(out, null, 2), 'utf8')

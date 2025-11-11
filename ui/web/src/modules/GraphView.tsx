@@ -165,8 +165,33 @@ export default function GraphView(props: {
     // nodes are dragged. We use milder repulsion, a stronger link force with
     // shorter distance, weak x/y centering forces and a small collision
     // radius. Also increase alpha decay so simulations settle faster.
-    sim = d3
-      .forceSimulation<NodeDatum>(nodes)
+    // Build per-source centers so nodes that share the same source are
+    // biased toward the same region. We place source centers around a
+    // circle and add forceX/forceY that pull nodes to their source center.
+    const sourceList: string[] = []
+    const nodePrimarySource = new Map<string, string | null>()
+    for (const n of nodes) {
+      const sids: string[] = Array.isArray((n as any).__sourceIds)
+        ? (n as any).__sourceIds
+        : Array.isArray(n.provenance)
+        ? (n.provenance as any[]).map((p) => p?.source || p?.sourceId || p?.id).filter(Boolean)
+        : []
+      const primary = sids && sids.length ? sids[0] : null
+      nodePrimarySource.set(n.id, primary)
+      if (primary && !sourceList.includes(primary)) sourceList.push(primary)
+    }
+    const sourceCenters = new Map<string, { x: number; y: number }>()
+    if (sourceList.length > 0) {
+      const bigR = Math.max(120, Math.min(w, h) / 3)
+      for (let i = 0; i < sourceList.length; i++) {
+        const angle = (i / sourceList.length) * Math.PI * 2
+        const cx = w / 2 + Math.cos(angle) * (bigR * 0.7)
+        const cy = h / 2 + Math.sin(angle) * (bigR * 0.7)
+        sourceCenters.set(sourceList[i], { x: cx, y: cy })
+      }
+    }
+
+    sim = d3.forceSimulation<NodeDatum>(nodes)
       .force(
         'link',
         d3
@@ -179,21 +204,38 @@ export default function GraphView(props: {
             // increase base link distance to reduce label/node overlap
             return Math.max(40, (s + t + 12) * 3)
           })
-          .strength(0.8)
+          .strength(0.95)
       )
-      // increase repulsion to scale the simulation up (twice the previous strength)
-      .force('charge', d3.forceManyBody().strength(-80))
-      .force('center', d3.forceCenter(w / 2, h / 2))
-      .force('x', d3.forceX(w / 2).strength(0.02))
-      .force('y', d3.forceY(h / 2).strength(0.02))
+      // stronger repulsion to reduce overlaps but allow clustering by source
+      .force('charge', d3.forceManyBody().strength(-2000))
+      // weak center fallback
+      .force('center', d3.forceCenter(w / 2, h / 2).strength(0.02))
+      // replace global x/y with source-targeted forces; nodes without a
+      // primary source will be attracted to the center
+      .force(
+        'sourceX',
+        d3.forceX<NodeDatum>().x((d: any) => {
+          const ps = nodePrimarySource.get(d.id)
+          return ps && sourceCenters.has(ps) ? (sourceCenters.get(ps) as any).x : w / 2
+        }).strength((d: any) => (nodePrimarySource.get(d.id) ? 0.6 : 0.02))
+      )
+      .force(
+        'sourceY',
+        d3.forceY<NodeDatum>().y((d: any) => {
+          const ps = nodePrimarySource.get(d.id)
+          return ps && sourceCenters.has(ps) ? (sourceCenters.get(ps) as any).y : h / 2
+        }).strength((d: any) => (nodePrimarySource.get(d.id) ? 0.6 : 0.02))
+      )
       .force(
         'collide',
         d3
           .forceCollide<NodeDatum>()
-          .radius((d: any) => (d.r ?? 8) + 4)
-          .strength(0.7)
+          .radius((d: any) => (d.r ?? 8) + 6)
+          .strength(0.9)
       )
-      .alphaDecay(0.05)
+      .alphaDecay(0.02)
+      // kick the simulation to be more 'energetic' so clusters form faster
+      .alpha(0.8)
 
     // NOTE: we'll render arrowheads as separate path elements (one per link)
     // instead of using SVG markers. This avoids cross-browser/ID issues and
@@ -480,6 +522,8 @@ export default function GraphView(props: {
             const p = d3.path()
             p.arc(x, y, r, 0, Math.PI * 2)
             pathStr = p.toString()
+            // store centroid for label placement
+            d.__centroid = [x, y]
           } else {
             // compute convex hull
             const hull = d3.polygonHull(pts as [number, number][])
@@ -493,6 +537,8 @@ export default function GraphView(props: {
               const k = 1 + pads / len
               return [centroid[0] + dx * k, centroid[1] + dy * k]
             })
+            // store centroid for label placement (use centroid of inflated polygon)
+            d.__centroid = d3.polygonCentroid(inflated as any)
             pathStr = pathGen(inflated as any) || ''
           }
           d3.select(this).attr('d', pathStr)
@@ -505,6 +551,33 @@ export default function GraphView(props: {
           .attr('stroke', (d: any) => (props.sourcePalette ? props.sourcePalette[d.id] || '#666' : '#666'))
           .attr('stroke-opacity', 0.7)
           .attr('stroke-width', 2)
+        // render centered source labels using the same colour as the outline
+        try {
+          const labelSel = bubbleG.selectAll('text.bubble-label').data(sourcesArr, (d: any) => d.id)
+          labelSel.exit().remove()
+          const labelEnter = labelSel
+            .enter()
+            .append('text')
+            .attr('class', 'bubble-label')
+            .attr('pointer-events', 'none')
+            .attr('text-anchor', 'middle')
+            .attr('dominant-baseline', 'central')
+            .attr('font-weight', 600 as any)
+            .attr('font-size', 14)
+          const labelsAll = labelEnter.merge(labelSel as any)
+          labelsAll.each(function (d: any) {
+            const col = props.sourcePalette ? props.sourcePalette[d.id] || '#666' : '#666'
+            const cent = (d as any).__centroid || (d.points && d.points[0]) || [0, 0]
+            d3.select(this)
+              .attr('x', cent[0])
+              .attr('y', cent[1])
+              .text(d.id)
+              .attr('fill', col)
+              .attr('opacity', 0.95)
+          })
+        } catch (e) {
+          // ignore label rendering errors
+        }
       } catch (e) {
         // don't let bubble rendering break the whole tick
       }

@@ -334,8 +334,8 @@ export default function App() {
     setVideoGraphExists(null)
     ;(async () => {
       try {
-  const u = selectedUniverse()
-  const r = await fetch(`/api/videos/${id}/graph${u ? `?universe=${encodeURIComponent(u)}` : ''}`)
+        const u = selectedUniverse()
+        const r = await fetch(`/api/videos/${id}/graph${u ? `?universe=${encodeURIComponent(u)}` : ''}`)
         if (!r.ok) {
           setVideoGraphExists(false)
           return
@@ -529,7 +529,10 @@ export default function App() {
                             const ok = window.confirm('Are you sure you want to delete this video and all artifacts?')
                             if (!ok) return
                             const u = selectedUniverse()
-                            const res = await fetch(`/api/videos/${encodeURIComponent(v.id)}${u ? `?universe=${encodeURIComponent(u)}` : ''}`, { method: 'DELETE' })
+                            const res = await fetch(
+                              `/api/videos/${encodeURIComponent(v.id)}${u ? `?universe=${encodeURIComponent(u)}` : ''}`,
+                              { method: 'DELETE' }
+                            )
                             if (!res.ok) {
                               const body = await res.json().catch(() => null)
                               window.alert('Delete failed: ' + (body?.error || res.statusText))
@@ -611,15 +614,17 @@ export default function App() {
                       <GraphView data={universeData()} showSourceOutlines={true} sourcePalette={buildSourcePalette()} />
                     </div>
                   </div>
+                ) : // Per-video view: show helpful states when graph is missing or loading
+                videoGraphLoading() ? (
+                  <div class="h-full border rounded bg-white flex items-center justify-center text-gray-500">
+                    Loading…
+                  </div>
+                ) : videoGraphExists() === false ? (
+                  <div class="h-full border rounded bg-white flex items-center justify-center text-gray-500">
+                    No Graph
+                  </div>
                 ) : (
-                  // Per-video view: show helpful states when graph is missing or loading
-                  videoGraphLoading() ? (
-                    <div class="h-full border rounded bg-white flex items-center justify-center text-gray-500">Loading…</div>
-                  ) : videoGraphExists() === false ? (
-                    <div class="h-full border rounded bg-white flex items-center justify-center text-gray-500">No Graph</div>
-                  ) : (
-                    <VideoCard id={selected()!} universe={selectedUniverse()} />
-                  )
+                  <VideoCard id={selected()!} universe={selectedUniverse()} />
                 )}
               </div>
             </Show>

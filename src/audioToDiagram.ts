@@ -272,6 +272,9 @@ export async function downloadYoutubeSingleWithInfo(youtubeURL: string, sourceDi
   const ytdlp = 'yt-dlp'
   // ensure dir exists
   await fsp.mkdir(sourceDir, { recursive: true })
+
+  // enable progress persistence to this source directory and flush any pending
+  // progress message we may have received earlier
   await new Promise<void>((resolve, reject) => {
     const args = [
       youtubeURL,
@@ -310,13 +313,36 @@ export default async function audioToDiagram(
   await fsp.mkdir(TMP_DIR, { recursive: true })
 
   // Ensure tools
-  const notify = async (msg: string) => {
-    if (!onProgress) return
+  // progress persistence: write a `progress.json` into the sourceDir when
+  // available so the UI can show which item is being processed. We buffer the
+  // most recent message until sourceDir is known.
+  let _sourceDirForProgress: string | null = null
+  let _pendingProgress: string | null = null
+
+  async function _persistProgress(msg: string) {
     try {
-      await Promise.resolve(onProgress(msg))
+      if (!_sourceDirForProgress) return
+      const out = { status: msg, updated: Date.now() }
+      await fsp.writeFile(path.join(_sourceDirForProgress, 'progress.json'), JSON.stringify(out, null, 2), 'utf8')
     } catch (e) {
-      debug('onProgress callback failed', e)
+      debug('Failed to write progress.json', e)
     }
+  }
+
+  const notify = async (msg: string) => {
+    // call callback for live updates
+    if (onProgress) {
+      try {
+        await Promise.resolve(onProgress(msg))
+      } catch (e) {
+        debug('onProgress callback failed', e)
+      }
+    }
+    // record pending and persist if possible
+    _pendingProgress = msg
+    try {
+      await _persistProgress(msg)
+    } catch (e) {}
   }
 
   await notify('Preparing dependencies (ffmpeg, whisper)…')
