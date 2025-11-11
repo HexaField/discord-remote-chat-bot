@@ -10,8 +10,17 @@ const app = express()
 app.use(cors())
 app.use(express.json())
 
-// Root directory for processed videos
+// Root directory for processed videos. Under this directory each subdirectory is
+// treated as a "universe" containing video folders. For backwards
+// compatibility, existing single-folder setups will still work.
 const DATA_ROOT = path.resolve(process.cwd(), '.tmp', 'audio-to-diagram')
+
+function listUniverses() {
+  if (!fs.existsSync(DATA_ROOT)) return []
+  return fs
+    .readdirSync(DATA_ROOT)
+    .filter((d) => fs.statSync(path.join(DATA_ROOT, d)).isDirectory())
+}
 
 interface VideoItem {
   id: string // youtube id
@@ -19,18 +28,20 @@ interface VideoItem {
   transcriptPath?: string
   vttPath?: string
   graphPath?: string
+  universe?: string
 }
 
-function readItems(): VideoItem[] {
-  if (!fs.existsSync(DATA_ROOT)) return []
-  const dirs = fs.readdirSync(DATA_ROOT).filter((d) => fs.statSync(path.join(DATA_ROOT, d)).isDirectory())
+function readItems(universe?: string): VideoItem[] {
+  const base = universe ? path.join(DATA_ROOT, universe) : DATA_ROOT
+  if (!fs.existsSync(base)) return []
+  const dirs = fs.readdirSync(base).filter((d) => fs.statSync(path.join(base, d)).isDirectory())
   return dirs.map((dir) => {
-    const transcriptPath = path.join(DATA_ROOT, dir, 'transcript.json')
-    const vttPath = path.join(DATA_ROOT, dir, 'audio.vtt')
-    const graphPath = path.join(DATA_ROOT, dir, 'graph.json')
+    const transcriptPath = path.join(base, dir, 'transcript.json')
+    const vttPath = path.join(base, dir, 'audio.vtt')
+    const graphPath = path.join(base, dir, 'graph.json')
     let title: string | undefined
     let thumbnail: string | undefined
-    const metaPath = path.join(DATA_ROOT, dir, 'meta.json')
+    const metaPath = path.join(base, dir, 'meta.json')
     if (fs.existsSync(metaPath)) {
       try {
         title = JSON.parse(fs.readFileSync(metaPath, 'utf-8')).title
@@ -51,16 +62,70 @@ function readItems(): VideoItem[] {
       thumbnail,
       transcriptPath: fs.existsSync(transcriptPath) ? transcriptPath : undefined,
       vttPath: fs.existsSync(vttPath) ? vttPath : undefined,
-      graphPath: fs.existsSync(graphPath) ? graphPath : undefined
-    }
+      graphPath: fs.existsSync(graphPath) ? graphPath : undefined,
+      // include universe marker for client convenience
+      universe: universe || undefined
+    } as any
   })
 }
 
-app.get('/api/videos', (_req: Request, res: Response) => {
-  const items = readItems().map((v) => ({ id: v.id, title: v.title, thumbnail: (v as any).thumbnail }))
+app.get('/api/videos', (req: Request, res: Response) => {
+  const universe = typeof req.query.universe === 'string' ? req.query.universe : undefined
+  const items = readItems(universe).map((v) => ({ id: v.id, title: v.title, thumbnail: (v as any).thumbnail }))
   res.json(items)
 })
 
+// List available universes
+app.get('/api/universes', (_req: Request, res: Response) => {
+  const u = listUniverses()
+  res.json(u)
+})
+
+// Create a universe (folder)
+app.post('/api/universes', (req: Request, res: Response) => {
+  const name = (req.body && req.body.name) || req.query.name
+  if (!name || typeof name !== 'string') return res.status(400).json({ error: 'Missing name' })
+  const safe = String(name).replace(/[^a-zA-Z0-9-_]/g, '-').slice(0, 64)
+  const dir = path.join(DATA_ROOT, safe)
+  try {
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+    return res.json({ name: safe })
+  } catch (e: any) {
+    return res.status(500).json({ error: String(e?.message || e) })
+  }
+})
+
+// Delete a video's folder and all artifacts. Accepts optional ?universe=...
+app.delete('/api/videos/:id', (req: Request, res: Response) => {
+  const { id } = req.params
+  const universe = typeof req.query.universe === 'string' ? req.query.universe : undefined
+  try {
+    const dir = universe ? path.join(DATA_ROOT, universe, id) : path.join(DATA_ROOT, id)
+    if (!fs.existsSync(dir)) return res.status(404).json({ error: 'Not found' })
+    // remove recursively
+    try {
+      // Node >=14.14 supports rmSync; fallback to rmdirSync for older
+      if ((fs as any).rmSync) (fs as any).rmSync(dir, { recursive: true, force: true })
+      else fs.rmdirSync(dir, { recursive: true })
+    } catch (e) {
+      // best-effort: try deleting contents then dir
+      try {
+        const files = fs.readdirSync(dir)
+        for (const f of files) {
+          const p = path.join(dir, f)
+          if (fs.statSync(p).isDirectory()) fs.rmdirSync(p, { recursive: true })
+          else fs.unlinkSync(p)
+        }
+        fs.rmdirSync(dir)
+      } catch (err) {
+        return res.status(500).json({ error: String((err as any)?.message || err) })
+      }
+    }
+    return res.json({ id, universe })
+  } catch (e: any) {
+    return res.status(500).json({ error: String(e?.message || e) })
+  }
+})
 function parseVtt(content: string) {
   const lines = content.split(/\r?\n/)
   const chunks: { start?: number; end?: number; text: string }[] = []
@@ -91,7 +156,8 @@ function parseVtt(content: string) {
 
 app.get('/api/videos/:id/transcript', (req: Request, res: Response) => {
   const { id } = req.params
-  const item = readItems().find((v) => v.id === id)
+  const universe = typeof req.query.universe === 'string' ? req.query.universe : undefined
+  const item = readItems(universe).find((v) => v.id === id)
   if (!item) return res.status(404).json({ error: 'Not found' })
   try {
     if (item.transcriptPath) {
@@ -111,7 +177,8 @@ app.get('/api/videos/:id/transcript', (req: Request, res: Response) => {
 
 app.get('/api/videos/:id/graph', (req: Request, res: Response) => {
   const { id } = req.params
-  const item = readItems().find((v) => v.id === id)
+  const universe = typeof req.query.universe === 'string' ? req.query.universe : undefined
+  const item = readItems(universe).find((v) => v.id === id)
   if (!item || !item.graphPath) return res.status(404).json({ error: 'Not found' })
   try {
     const raw = JSON.parse(fs.readFileSync(item.graphPath, 'utf-8'))
@@ -148,7 +215,8 @@ app.get('/api/videos/:id/graph', (req: Request, res: Response) => {
 // an updated graph.json in the same directory.
 app.post('/api/videos/:id/regenerate', async (req: Request, res: Response) => {
   const { id } = req.params
-  const item = readItems().find((v) => v.id === id)
+  const universe = typeof req.query.universe === 'string' ? req.query.universe : undefined
+  const item = readItems(universe).find((v) => v.id === id)
   if (!item) return res.status(404).json({ error: 'Not found' })
   try {
     // Build transcript array: prefer transcriptPath JSON, otherwise parse VTT
@@ -186,7 +254,7 @@ app.post('/api/videos/:id/regenerate', async (req: Request, res: Response) => {
     )
 
     // write graph.json
-    const dir = path.join(DATA_ROOT, id)
+  const dir = path.join(DATA_ROOT, item.universe ?? '', id)
     const graphPath = path.join(dir, 'graph.json')
     const out = { nodes: cld.nodes, relationships: cld.relationships }
     fs.writeFileSync(graphPath, JSON.stringify(out, null, 2), 'utf8')
@@ -214,24 +282,39 @@ app.post('/api/videos/import', upload.array('files'), async (req: Request, res: 
     if (files && files.length) {
       for (const f of files) {
         try {
+          // universe selection may be provided as form field or query param
+          const universe = (req.body && req.body.universe) || req.query.universe || 'default'
+          const baseDir = path.join(DATA_ROOT, String(universe))
+          if (!fs.existsSync(baseDir)) fs.mkdirSync(baseDir, { recursive: true })
+
           // derive an id from the original filename (sanitized)
           const base = path.basename(f.originalname || 'upload')
-          const name = base.replace(path.extname(base), '')
+          const name = base.replace(/\.fathom\.txt$/i, '').replace(path.extname(base), '')
           const safe = name.replace(/[^a-zA-Z0-9-_]/g, '-').slice(0, 64) || `upload-${Date.now()}`
           let id = safe
-          const targetDir = () => path.join(DATA_ROOT, id)
+          const targetDir = () => path.join(baseDir, id)
           if (fs.existsSync(targetDir())) {
             id = `${safe}-${Date.now()}`
           }
-          const dir = path.join(DATA_ROOT, id)
+          const dir = path.join(baseDir, id)
           fs.mkdirSync(dir, { recursive: true })
-          // write uploaded file to expected audio filename so audioToDiagram will pick it up
-          const dest = path.join(dir, `audio.mp3`)
-          fs.writeFileSync(dest, f.buffer)
-          // run full pipeline using file:// URL to the saved file
-          const fileUrl = `file://${dest}`
-          await audioToDiagram(fileUrl, notify, true)
-          results.push({ file: f.originalname, id, status: 'ok' })
+          // If the uploaded file is a Fathom transcript, save it as transcript.fathom.txt
+          // so the audioToDiagram flow will detect and parse it. Otherwise save as audio.mp3
+          if (/(?:\.fathom\.txt)$/i.test(f.originalname || '')) {
+            const dest = path.join(dir, `transcript.fathom.txt`)
+            fs.writeFileSync(dest, f.buffer)
+            // call pipeline with file:// URL to the saved transcript
+            const fileUrl = `file://${dest}`
+            await audioToDiagram(fileUrl, notify, true)
+          } else {
+            // write uploaded file to expected audio filename so audioToDiagram will pick it up
+            const dest = path.join(dir, `audio.mp3`)
+            fs.writeFileSync(dest, f.buffer)
+            // run full pipeline using file:// URL to the saved file
+            const fileUrl = `file://${dest}`
+            await audioToDiagram(fileUrl, notify, true)
+          }
+          results.push({ file: f.originalname, id, status: 'ok', universe })
         } catch (e: any) {
           console.error('[import] file failed', f.originalname, e)
           results.push({ file: f.originalname, status: 'error', error: String(e?.message || e) })
@@ -249,10 +332,30 @@ app.post('/api/videos/import', upload.array('files'), async (req: Request, res: 
         .split(/\r?\n/)
         .map((s) => s.trim())
         .filter(Boolean)
+      // For URL imports we allow specifying a universe via body.universe or query
+      const universe = (req.body && req.body.universe) || req.query.universe || 'default'
+      const baseDir = path.join(DATA_ROOT, String(universe))
+      if (!fs.existsSync(baseDir)) fs.mkdirSync(baseDir, { recursive: true })
       for (const line of lines) {
         try {
-          await audioToDiagram(line, notify, true)
-          results.push({ url: line, status: 'ok' })
+          const out = await audioToDiagram(line, notify, true)
+          // audioToDiagram returns { dir, ... } where dir is the folder it wrote to.
+          // Move the generated folder into the selected universe with a safe id.
+          try {
+            const base = path.basename(line).replace(path.extname(line), '')
+            const safe = base.replace(/[^a-zA-Z0-9-_]/g, '-').slice(0, 64) || `import-${Date.now()}`
+            let id = safe
+            const targetDir = path.join(baseDir, id)
+            if (fs.existsSync(targetDir)) id = `${safe}-${Date.now()}`
+            const finalDir = path.join(baseDir, id)
+            if (out && out.dir && fs.existsSync(out.dir)) {
+              // move/rename generated dir to finalDir
+              fs.renameSync(out.dir, finalDir)
+            }
+            results.push({ url: line, status: 'ok', id, universe })
+          } catch (e) {
+            results.push({ url: line, status: 'ok', info: 'generated but failed to relocate' })
+          }
         } catch (e: any) {
           console.error('[import] url failed', line, e)
           results.push({ url: line, status: 'error', error: String(e?.message || e) })

@@ -335,35 +335,183 @@ export default async function audioToDiagram(
   const originalName = path.basename(urlPath) || `audio-${Date.now()}`
   const baseName = path.basename(originalName, path.extname(originalName))
 
-  const sourceDir = path.join(TMP_DIR, baseName)
+  // If the input is a local file URL and lives inside an existing folder (for
+  // example the import handler saved the file to DATA_ROOT/<universe>/<id>),
+  // prefer to use that containing directory as the sourceDir so generated
+  // artifacts (graph.json, audio.vtt, kumu.json) are colocated with the
+  // uploaded file. Otherwise fall back to the normal TMP_DIR/<baseName>.
+  let sourceDir = path.join(TMP_DIR, baseName)
+  try {
+    if (audioURL.startsWith('file://')) {
+      const fp = decodeURIComponent(new URL(audioURL).pathname)
+      try {
+        const stat = await fsp.stat(fp)
+        if (stat.isFile()) {
+          sourceDir = path.dirname(fp)
+        }
+      } catch (e) {
+        // if file doesn't exist yet or cannot stat, ignore and use default
+      }
+    }
+  } catch (e) {
+    // ignore URL parsing errors and continue with default sourceDir
+  }
   await fsp.mkdir(sourceDir, { recursive: true })
 
   const audioPath = path.join(sourceDir, `audio.${audioFormat}`)
   const transcriptPath = path.join(sourceDir, `audio.vtt`)
   const graphJSONPath = path.join(sourceDir, `graph.json`)
+  // Support Fathom transcript files (may be local or remote). If the provided
+  // audioURL points at a `.fathom.txt` transcript we will download/copy and
+  // parse it into the same array-of-sentences (`transcripts`) used below and
+  // skip audio download / Whisper transcription.
+  const transcripts = [] as string[]
 
-  if (!(await existsNonEmpty(audioPath))) {
-    // Download strictly using chapter splitting for YouTube; for direct audio URLs, download as-is
-    await notify('Downloading audio (chapters if available)…')
-    if (audioURL.includes('youtube.com') || audioURL.includes('youtu.be')) {
-      // Download a single file + info.json, then transcribe once and split by chapters
-      await downloadYoutubeSingleWithInfo(audioURL, sourceDir, audioFormat)
-    } else {
-      await downloadToFile(audioURL, audioPath)
+  const isFathom = String(audioURL || '')
+    .toLowerCase()
+    .includes('.fathom.txt')
+
+  async function downloadOrCopyFathom(src: string, dest: string) {
+    try {
+      // Local path? If file exists locally, copy it.
+      if (!src.startsWith('http://') && !src.startsWith('https://')) {
+        // treat as local path
+        const localPath = src.replace(/^file:\/\//, '')
+        try {
+          await fsp.copyFile(localPath, dest)
+          return
+        } catch (e) {
+          // fallthrough to try download
+          debug('Local copy of fathom file failed, will try download:', e)
+        }
+      }
+      // Otherwise download via fetch
+      await downloadToFile(src, dest)
+    } catch (e) {
+      throw new Error('Failed to obtain Fathom transcript: ' + (e as any)?.message || String(e))
     }
   }
 
-  // Transcribe whole file to VTT (timestamps) so we can split per chapter
-  const outBase = path.join(sourceDir, 'audio')
-  const WHISPER_MODEL = process.env.WHISPER_MODEL || path.join(os.homedir(), 'models/ggml-base.en.bin')
-  if (!(await existsNonEmpty(transcriptPath))) {
-    await transcribeWithWhisper(WHISPER_MODEL, audioPath, transcriptPath, outBase)
+  function parseFathomTranscript(content: string) {
+    // Parse lines like: "0:00 - Speaker Name\n  text..." or "1:08:58 - Name"
+    // Collect contiguous lines until next timestamp as a single chunk. Skip
+    // explicit omitted markers (/* Lines ... omitted */) and short metadata.
+    const lines = content.split(/\r?\n/)
+    const chunks: string[] = []
+    let curSpeaker: string | null = null
+    let curText: string[] = []
+
+    const tsRegex = /^\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*-\s*(.*)$/
+    for (let raw of lines) {
+      const line = raw.trim()
+      if (!line) continue
+      // skip omitted markers
+      if (/^\/\*\s*Lines\s+\d+/i.test(line)) continue
+      // skip the "VIEW RECORDING" header lines or lines that are purely timing/labels
+      if (/^VIEW RECORDING/i.test(line)) continue
+      const m = line.match(tsRegex)
+      if (m) {
+        // flush previous
+        if (curSpeaker || curText.length > 0) {
+          const combined = (curSpeaker ? curSpeaker + ': ' : '') + curText.join(' ')
+          const norm = normalizeTranscript(combined)
+          if (norm) chunks.push(norm)
+        }
+        curSpeaker = m[2].trim()
+        curText = []
+        // If there's anything after speaker on same line, treat as first text
+        // (e.g. "0:00 - Name\n  And all that, ..." vs "0:00 - Name  And all that")
+        const remainder = ''
+        if (remainder) curText.push(remainder)
+        continue
+      }
+      // Otherwise it's content belonging to current block; if no speaker yet,
+      // treat as anonymous text block
+      if (!curSpeaker && chunks.length === 0) {
+        // First block without timestamp: treat as intro; start anonymous
+        curText.push(line)
+      } else {
+        curText.push(line)
+      }
+    }
+    // flush last
+    if (curSpeaker || curText.length > 0) {
+      const combined = (curSpeaker ? curSpeaker + ': ' : '') + curText.join(' ')
+      const norm = normalizeTranscript(combined)
+      if (norm) chunks.push(norm)
+    }
+
+    return chunks
   }
 
-  const transcripts = [] as string[]
+  if (isFathom) {
+    await notify('Detected Fathom transcript; reading and parsing…')
+    const fathomPath = path.join(sourceDir, 'transcript.fathom.txt')
+    await fsp.mkdir(sourceDir, { recursive: true })
+    await downloadOrCopyFathom(audioURL, fathomPath)
+    const content = await fsp.readFile(fathomPath, 'utf8')
+    const parsed = parseFathomTranscript(content)
+    for (const p of parsed) transcripts.push(p)
+    console.log(`Parsed ${transcripts.length} transcript chunk(s) from Fathom file`)
+
+    // Also generate a minimal VTT file so downstream tools/UI can consume a
+    // standardized transcript format. Each chunk will be assigned a sequential
+    // 10s window. This is best-effort since Fathom transcripts may not include
+    // timestamps.
+    try {
+      const secondsPerChunk = 10
+      function pad(n: number, width = 2) {
+        return String(n).padStart(width, '0')
+      }
+      function secToVtt(t: number) {
+        const hrs = Math.floor(t / 3600)
+        const mins = Math.floor((t % 3600) / 60)
+        const secs = Math.floor(t % 60)
+        const ms = Math.floor((t - Math.floor(t)) * 1000)
+        return `${pad(hrs)}:${pad(mins)}:${pad(secs)}.${String(ms).padStart(3, '0')}`
+      }
+      let t0 = 0
+      let vtt = 'WEBVTT\n\n'
+      for (let i = 0; i < transcripts.length; i++) {
+        const start = t0
+        const end = t0 + secondsPerChunk
+        vtt += `${secToVtt(start)} --> ${secToVtt(end)}\n${transcripts[i]}\n\n`
+        t0 = end
+      }
+      await fsp.writeFile(transcriptPath, vtt, 'utf8')
+      debug('Wrote generated VTT for Fathom transcript to', transcriptPath)
+    } catch (e) {
+      debug('Failed to write VTT for Fathom transcript', e)
+    }
+  } else {
+    // Ensure tools (ffmpeg, whisper) only when we need to process audio
+    await notify('Preparing dependencies (ffmpeg, whisper)…')
+    await ensureFfmpegAvailable()
+    await ensureWhisperAvailable()
+
+    if (!(await existsNonEmpty(audioPath))) {
+      // Download strictly using chapter splitting for YouTube; for direct audio URLs, download as-is
+      await notify('Downloading audio (chapters if available)…')
+      if (audioURL.includes('youtube.com') || audioURL.includes('youtu.be')) {
+        // Download a single file + info.json, then transcribe once and split by chapters
+        await downloadYoutubeSingleWithInfo(audioURL, sourceDir, audioFormat)
+      } else {
+        await downloadToFile(audioURL, audioPath)
+      }
+    }
+
+    // Transcribe whole file to VTT (timestamps) so we can split per chapter
+    const outBase = path.join(sourceDir, 'audio')
+    const WHISPER_MODEL = process.env.WHISPER_MODEL || path.join(os.homedir(), 'models/ggml-base.en.bin')
+    if (!(await existsNonEmpty(transcriptPath))) {
+      await transcribeWithWhisper(WHISPER_MODEL, audioPath, transcriptPath, outBase)
+    }
+  }
   // Read VTT content and try to extract either NOTE Chapter ranges (yt-dlp style)
   // or individual cue blocks. We want each timestamped section as its own transcript.
-  const vttContent = await fsp.readFile(path.join(sourceDir, `audio.vtt`), 'utf8')
+  const vttContent = (await existsNonEmpty(path.join(sourceDir, `audio.vtt`)))
+    ? await fsp.readFile(path.join(sourceDir, `audio.vtt`), 'utf8')
+    : ''
 
   // First, try to detect NOTE Chapter entries (some yt-dlp outputs include these)
   const chapterNoteRegex = /NOTE Chapter: (.+?)\s+(\d{2}:\d{2}:\d{2}\.\d{3}) --> (\d{2}:\d{2}:\d{2}\.\d{3})/g
@@ -377,39 +525,44 @@ export default async function audioToDiagram(
   const cueRegex =
     /(\d{2}:\d{2}:\d{2}\.\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}\.\d{3})\s*\n([\s\S]*?)(?=\n\s*\d{2}:\d{2}:\d{2}\.\d{3}\s*-->|$)/gm
 
-  if (chapters.length === 0) {
-    // No chapters: split by each cue and use the cue text as a transcript chunk
-    let cueMatch: RegExpExecArray | null
-    while ((cueMatch = cueRegex.exec(vttContent)) !== null) {
-      const cueText = cueMatch[3].replace(/\n+/g, ' ').trim()
-      if (cueText.length > 0) transcripts.push(normalizeTranscript(cueText))
-    }
-
-    // Fallback: if no cues found (malformed VTT), use the whole transcript file
-    if (transcripts.length === 0) {
-      const fullTranscript = await fsp.readFile(transcriptPath, 'utf8')
-      transcripts.push(normalizeTranscript(fullTranscript))
-    }
-  } else {
-    // We have chapter ranges: for each chapter, collect cue texts that fall within the range
-    for (const chapter of chapters) {
-      let chapterText = ''
+  if (!isFathom) {
+    if (chapters.length === 0) {
+      // No chapters: split by each cue and use the cue text as a transcript chunk
       let cueMatch: RegExpExecArray | null
-      cueRegex.lastIndex = 0
       while ((cueMatch = cueRegex.exec(vttContent)) !== null) {
-        const startTime = cueMatch[1]
-        const endTime = cueMatch[2]
-        // lexical compare works for HH:MM:SS.mmm format
-        if (startTime >= chapter.start && endTime <= chapter.end) {
-          chapterText += cueMatch[3].replace(/\n+/g, ' ').trim() + ' '
-        }
+        const cueText = cueMatch[3].replace(/\n+/g, ' ').trim()
+        if (cueText.length > 0) transcripts.push(normalizeTranscript(cueText))
       }
-      if (chapterText.trim().length > 0) transcripts.push(normalizeTranscript(chapterText))
-    }
-  }
 
-  console.log(`Generated ${transcripts.length} transcript chunk(s) from ${chapters.length} chapter(s)`)
-  console.log(transcripts)
+      // Fallback: if no cues found (malformed VTT), use the whole transcript file
+      if (transcripts.length === 0) {
+        const fullTranscript = await fsp.readFile(transcriptPath, 'utf8')
+        transcripts.push(normalizeTranscript(fullTranscript))
+      }
+    } else {
+      // We have chapter ranges: for each chapter, collect cue texts that fall within the range
+      for (const chapter of chapters) {
+        let chapterText = ''
+        let cueMatch: RegExpExecArray | null
+        cueRegex.lastIndex = 0
+        while ((cueMatch = cueRegex.exec(vttContent)) !== null) {
+          const startTime = cueMatch[1]
+          const endTime = cueMatch[2]
+          // lexical compare works for HH:MM:SS.mmm format
+          if (startTime >= chapter.start && endTime <= chapter.end) {
+            chapterText += cueMatch[3].replace(/\n+/g, ' ').trim() + ' '
+          }
+        }
+        if (chapterText.trim().length > 0) transcripts.push(normalizeTranscript(chapterText))
+      }
+    }
+    console.log(`Generated ${transcripts.length} transcript chunk(s) from ${chapters.length} chapter(s)`)
+    console.log(transcripts)
+  } else {
+    // Already parsed Fathom transcripts above
+    console.log(`Using ${transcripts.length} parsed Fathom transcript chunk(s)`)
+    console.log(transcripts)
+  }
 
   // Generate nodes and relationships. If a graph JSON exists, load it and use that as the source of truth.
 

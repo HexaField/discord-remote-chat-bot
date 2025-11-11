@@ -14,7 +14,7 @@ interface GraphData {
   links: { source: string; target: string; label?: string }[]
 }
 
-export default function VideoCard(props: { id: string }): JSX.Element {
+export default function VideoCard(props: { id: string; universe?: string }): JSX.Element {
   const [transcript, setTranscript] = createSignal<TranscriptChunk[]>([])
   const [graph, setGraph] = createSignal<GraphData | null>(null)
   const [highlightedNodes, setHighlightedNodes] = createSignal<Set<string> | null>(null)
@@ -71,11 +71,12 @@ export default function VideoCard(props: { id: string }): JSX.Element {
   }
 
   createEffect(() => {
-    fetch(`/api/videos/${props.id}/transcript`)
+    const u = props.universe ? `?universe=${encodeURIComponent(props.universe)}` : ''
+    fetch(`/api/videos/${props.id}/transcript${u}`)
       .then((r) => r.json())
       .then(setTranscript)
       .catch(() => {})
-    fetch(`/api/videos/${props.id}/graph`)
+    fetch(`/api/videos/${props.id}/graph${u}`)
       .then((r) => r.json())
       .then(setGraph)
       .catch(() => {})
@@ -241,6 +242,7 @@ export default function VideoCard(props: { id: string }): JSX.Element {
               onNodeClick={handleNodeClick}
               selectedNodeId={selectedNodeId()}
               videoId={props.id}
+              universe={props.universe}
               onRegenerated={(d: any) => {
                 try {
                   setGraph(d)

@@ -7,10 +7,34 @@ export type VideoItem = { id: string; title?: string; thumbnail?: string }
 export default function App() {
   const [videos, setVideos] = createSignal<VideoItem[]>([])
   const [selected, setSelected] = createSignal<string | null>(null)
+  const [hoveredVideo, setHoveredVideo] = createSignal<string | null>(null)
+  const [universes, setUniverses] = createSignal<string[]>([])
+  const [selectedUniverse, setSelectedUniverse] = createSignal<string>('default')
 
+  // load universes and videos for the selected universe
   createEffect(() => {
-    // initial load
-    fetch('/api/videos')
+    // load universes
+    fetch('/api/universes')
+      .then((r) => r.json())
+      .then((list) => {
+        if (Array.isArray(list) && list.length) {
+          setUniverses(list)
+          // if current selectedUniverse not in list, pick first
+          if (!list.includes(selectedUniverse())) setSelectedUniverse(list[0])
+        } else {
+          // ensure at least 'default' exists as UI-friendly option
+          setUniverses(['default'])
+          if (!selectedUniverse()) setSelectedUniverse('default')
+        }
+      })
+      .catch((err) => {
+        console.error('Failed to load universes', err)
+        setUniverses(['default'])
+      })
+
+    // load videos for selected universe
+    const u = selectedUniverse()
+    fetch(`/api/videos${u ? `?universe=${encodeURIComponent(u)}` : ''}`)
       .then((r) => r.json())
       .then(setVideos)
       .catch((err) => console.error('Failed to load videos', err))
@@ -19,10 +43,27 @@ export default function App() {
   // helper to refresh videos list from server
   async function refreshVideos() {
     try {
-      const r = await fetch('/api/videos')
+      const u = selectedUniverse()
+      const r = await fetch(`/api/videos${u ? `?universe=${encodeURIComponent(u)}` : ''}`)
       if (r.ok) setVideos(await r.json())
     } catch (e) {
       console.error('Failed to refresh videos', e)
+    }
+  }
+
+  // File input ref and upload handler for the "Add Video +" button
+  let fileInput: HTMLInputElement | undefined
+  async function handleFilesUpload(files: FileList | null) {
+    if (!files || files.length === 0) return
+    const fd = new FormData()
+    for (let i = 0; i < files.length; i++) fd.append('files', files[i])
+    // include selected universe
+    fd.append('universe', selectedUniverse())
+    try {
+      await fetch(`/api/videos/import`, { method: 'POST', body: fd })
+      await refreshVideos()
+    } catch (e) {
+      console.error('Upload failed', e)
     }
   }
 
@@ -70,6 +111,15 @@ export default function App() {
     // apply initial theme
     applyTheme(theme())
 
+    // read video & universe from search params on mount
+    try {
+      const params = new URLSearchParams(window.location.search)
+      const v = params.get('v')
+      const u = params.get('u')
+      if (v) setSelected(v)
+      if (u) setSelectedUniverse(u)
+    } catch (e) {}
+
     // listen for system preference changes when in 'system' mode
     try {
       mediaQ = window.matchMedia('(prefers-color-scheme: dark)')
@@ -91,15 +141,18 @@ export default function App() {
   const UNIVERSE_ID = 'UNIVERSE'
   const [universeData, setUniverseData] = createSignal<{ nodes: any[]; links: any[] } | null>(null)
   const [universeLoading, setUniverseLoading] = createSignal(false)
+  const [videoGraphExists, setVideoGraphExists] = createSignal<boolean | null>(null)
+  const [videoGraphLoading, setVideoGraphLoading] = createSignal(false)
 
   async function loadUniverse() {
     setUniverseLoading(true)
     try {
-      const items = await fetch('/api/videos').then((r) => r.json())
+      const u = selectedUniverse()
+      const items = await fetch(`/api/videos${u ? `?universe=${encodeURIComponent(u)}` : ''}`).then((r) => r.json())
       // fetch all graphs in parallel
       const fetches = items.map(async (it: any) => {
         try {
-          const r = await fetch(`/api/videos/${it.id}/graph`)
+          const r = await fetch(`/api/videos/${it.id}/graph${u ? `?universe=${encodeURIComponent(u)}` : ''}`)
           if (!r.ok) return null
           const g = await r.json()
           return { id: it.id, graph: g }
@@ -244,11 +297,15 @@ export default function App() {
   // keep search params in sync with selection (replaceState only when changed)
   createEffect(() => {
     const v = selected()
+    const u = selectedUniverse()
     const params = new URLSearchParams(window.location.search)
-    const cur = params.get('v')
-    if (v === cur) return
+    const curV = params.get('v')
+    const curU = params.get('u')
+    if (v === curV && u === curU) return
     if (v) params.set('v', v)
     else params.delete('v')
+    if (u) params.set('u', u)
+    else params.delete('u')
     const q = params.toString()
     const url = window.location.pathname + (q ? `?${q}` : '')
     history.replaceState(null, '', url)
@@ -262,6 +319,37 @@ export default function App() {
       // clear cached universe data when leaving view
       setUniverseData(null)
     }
+  })
+
+  // When a specific video is selected, check whether a graph exists for it so
+  // the UI can show a helpful "No Graph" message before rendering VideoCard.
+  createEffect(() => {
+    const id = selected()
+    if (!id || id === UNIVERSE_ID) {
+      setVideoGraphExists(null)
+      setVideoGraphLoading(false)
+      return
+    }
+    setVideoGraphLoading(true)
+    setVideoGraphExists(null)
+    ;(async () => {
+      try {
+  const u = selectedUniverse()
+  const r = await fetch(`/api/videos/${id}/graph${u ? `?universe=${encodeURIComponent(u)}` : ''}`)
+        if (!r.ok) {
+          setVideoGraphExists(false)
+          return
+        }
+        const j = await r.json()
+        const hasNodes = Array.isArray(j.nodes) && j.nodes.length > 0
+        const hasLinks = Array.isArray(j.links) && j.links.length > 0
+        setVideoGraphExists(hasNodes || hasLinks)
+      } catch (e) {
+        setVideoGraphExists(false)
+      } finally {
+        setVideoGraphLoading(false)
+      }
+    })()
   })
 
   return (
@@ -281,7 +369,9 @@ export default function App() {
               if (dt.files && dt.files.length > 0) {
                 const fd = new FormData()
                 for (let i = 0; i < dt.files.length; i++) fd.append('files', dt.files[i])
-                await fetch('/api/videos/import', { method: 'POST', body: fd })
+                // include selected universe in the upload
+                fd.append('universe', selectedUniverse())
+                await fetch(`/api/videos/import`, { method: 'POST', body: fd })
                 await refreshVideos()
                 return
               }
@@ -304,10 +394,10 @@ export default function App() {
             try {
               const text = e.clipboardData?.getData('text/plain')
               if (!text) return
-              await fetch('/api/videos/import', {
+              await fetch(`/api/videos/import?universe=${encodeURIComponent(selectedUniverse())}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ text })
+                body: JSON.stringify({ text, universe: selectedUniverse() })
               })
               await refreshVideos()
             } catch (err) {
@@ -325,7 +415,43 @@ export default function App() {
                 {collapsed() ? '▸' : '◂'}
               </button>
               {/* hide title when collapsed */}
-              {!collapsed() && <span class="font-semibold">Videos</span>}
+              {!collapsed() && (
+                <div class="flex items-center gap-2">
+                  <span class="font-semibold">Videos</span>
+                  <select
+                    class="text-sm border rounded px-2 py-0.5"
+                    value={selectedUniverse()}
+                    onInput={(e: any) => setSelectedUniverse(e.target.value)}
+                  >
+                    <For each={universes()}>{(u) => <option value={u}>{u}</option>}</For>
+                  </select>
+                  <button
+                    class="text-xs px-2 py-0.5 border rounded hover:bg-gray-50"
+                    onClick={async () => {
+                      const name = window.prompt('Create universe (name)')
+                      if (!name) return
+                      try {
+                        const r = await fetch('/api/universes', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ name })
+                        })
+                        if (r.ok) {
+                          // refresh universes
+                          const list = await fetch('/api/universes').then((r) => r.json())
+                          setUniverses(list)
+                          setSelectedUniverse(name.replace(/[^a-zA-Z0-9-_]/g, '-'))
+                          await refreshVideos()
+                        }
+                      } catch (e) {
+                        console.error('Create universe failed', e)
+                      }
+                    }}
+                  >
+                    +
+                  </button>
+                </div>
+              )}
             </div>
             <div class="flex items-center gap-2">
               {!collapsed() && <div class="text-xs text-gray-500">{videos().length} items</div>}
@@ -367,27 +493,82 @@ export default function App() {
             </button>
             <For each={videos()}>
               {(v) => (
-                <button
-                  class={`w-full text-left p-3 hover:bg-gray-50 flex items-center gap-2 ${selected() === v.id ? 'bg-gray-100' : ''}`}
-                  onClick={() => setSelected((p) => (p === v.id ? null : v.id))}
+                <div
+                  class={`w-full text-left p-0 hover:bg-gray-50 flex items-center gap-2 overflow-hidden ${selected() === v.id ? 'bg-gray-100' : ''}`}
+                  onMouseEnter={() => setHoveredVideo(v.id)}
+                  onMouseLeave={() => setHoveredVideo(null)}
                 >
-                  <div class="w-8 h-8 bg-gray-200 rounded overflow-hidden">
-                    {v.thumbnail ? (
-                      <img src={v.thumbnail} alt={v.title ?? v.id} class="w-8 h-8 object-cover" />
-                    ) : (
-                      <div class="w-8 h-8 flex items-center justify-center text-xs">YT</div>
-                    )}
-                  </div>
-                  {/* hide text content when collapsed */}
-                  {!collapsed() && (
-                    <div class="truncate">
-                      <div class="font-semibold truncate">{v.title ?? v.id}</div>
-                      <div class="text-xs text-gray-500 truncate">{v.id}</div>
+                  <button
+                    class="flex-1 text-left p-3 flex items-center gap-2 min-w-0"
+                    onClick={() => setSelected((p) => (p === v.id ? null : v.id))}
+                  >
+                    <div class="w-8 h-8 bg-gray-200 rounded overflow-hidden">
+                      {v.thumbnail ? (
+                        <img src={v.thumbnail} alt={v.title ?? v.id} class="w-8 h-8 object-cover" />
+                      ) : (
+                        <div class="w-8 h-8 flex items-center justify-center text-xs">YT</div>
+                      )}
                     </div>
-                  )}
-                </button>
+                    {/* hide text content when collapsed */}
+                    {!collapsed() && (
+                      <div class="truncate min-w-0">
+                        <div class="font-semibold truncate">{v.title ?? v.id}</div>
+                        <div class="text-xs text-gray-500 truncate">{v.id}</div>
+                      </div>
+                    )}
+                  </button>
+
+                  {/* Delete button shown on hover */}
+                  <div class="pr-2 pl-1">
+                    <Show when={hoveredVideo() === v.id}>
+                      <button
+                        class="w-7 h-7 flex items-center justify-center rounded-full bg-red-600 text-white text-xs hover:bg-red-700"
+                        onClick={async (e) => {
+                          try {
+                            e.stopPropagation()
+                            const ok = window.confirm('Are you sure you want to delete this video and all artifacts?')
+                            if (!ok) return
+                            const u = selectedUniverse()
+                            const res = await fetch(`/api/videos/${encodeURIComponent(v.id)}${u ? `?universe=${encodeURIComponent(u)}` : ''}`, { method: 'DELETE' })
+                            if (!res.ok) {
+                              const body = await res.json().catch(() => null)
+                              window.alert('Delete failed: ' + (body?.error || res.statusText))
+                              return
+                            }
+                            await refreshVideos()
+                            if (selected() === v.id) setSelected(null)
+                          } catch (err) {
+                            console.error('Delete failed', err)
+                            window.alert('Delete failed')
+                          }
+                        }}
+                        title="Delete video"
+                      >
+                        ×
+                      </button>
+                    </Show>
+                  </div>
+                </div>
               )}
             </For>
+          </div>
+
+          {/* Add Video button and hidden file input */}
+          <div class="p-2 border-t flex items-center justify-center">
+            <input
+              ref={(el) => (fileInput = el)}
+              type="file"
+              multiple
+              accept="audio/*,video/*,.vtt,.txt"
+              class="hidden"
+              onChange={(e) => handleFilesUpload((e.target as HTMLInputElement).files)}
+            />
+            <button
+              class="w-full text-sm py-2 px-3 bg-white border rounded hover:bg-gray-50"
+              onClick={() => fileInput && fileInput.click()}
+            >
+              Add Video +
+            </button>
           </div>
 
           {/* Resize handle for sidebar */}
@@ -431,7 +612,14 @@ export default function App() {
                     </div>
                   </div>
                 ) : (
-                  <VideoCard id={selected()!} />
+                  // Per-video view: show helpful states when graph is missing or loading
+                  videoGraphLoading() ? (
+                    <div class="h-full border rounded bg-white flex items-center justify-center text-gray-500">Loading…</div>
+                  ) : videoGraphExists() === false ? (
+                    <div class="h-full border rounded bg-white flex items-center justify-center text-gray-500">No Graph</div>
+                  ) : (
+                    <VideoCard id={selected()!} universe={selectedUniverse()} />
+                  )
                 )}
               </div>
             </Show>

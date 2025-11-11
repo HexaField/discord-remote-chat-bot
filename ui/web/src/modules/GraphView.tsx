@@ -30,6 +30,7 @@ export default function GraphView(props: {
   // when true, draw colored outlines around nodes per source id using sourcePalette
   showSourceOutlines?: boolean
   sourcePalette?: Record<string, string>
+  universe?: string
 }): JSX.Element {
   const videoId = props.videoId
   const onRegenerated = props.onRegenerated
@@ -684,6 +685,13 @@ export default function GraphView(props: {
 
   return (
     <div ref={(el) => (container = el)} class="relative w-full h-full border rounded">
+      {/* Overlay message when no graph data is available */}
+      {(!props.data || (props.data.nodes?.length ?? 0) === 0) && (
+        <div class="absolute inset-0 z-20 flex items-center justify-center pointer-events-none">
+          <div class="text-gray-500 text-sm">No Graph</div>
+        </div>
+      )}
+
       <div class="absolute top-2 right-2 flex gap-2 z-10">
         <button
           class="px-2 py-1 text-sm bg-white border rounded shadow hover:bg-gray-50"
@@ -691,10 +699,12 @@ export default function GraphView(props: {
             if (!videoId) return
             try {
               const b = document.activeElement as HTMLElement // keep focus
+              // include optional universe query param
+              const u = props.universe ? `?universe=${encodeURIComponent(props.universe)}` : ''
               // POST to trigger regeneration
-              await fetch(`/api/videos/${videoId}/regenerate`, { method: 'POST' })
+              await fetch(`/api/videos/${videoId}/regenerate${u}`, { method: 'POST' })
               // fetch updated graph
-              const r = await fetch(`/api/videos/${videoId}/graph`)
+              const r = await fetch(`/api/videos/${videoId}/graph${u}`)
               if (r.ok) {
                 const json = await r.json()
                 onRegenerated?.(json)
