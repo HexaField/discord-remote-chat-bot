@@ -13,7 +13,7 @@ import 'dotenv/config'
 import fs from 'fs/promises'
 import path from 'path'
 import audioToDiagram from './audioToDiagram'
-import { callLLM } from './llm'
+import { callLLM } from './interfaces/llm'
 
 const DISCORD_TOKEN: string | undefined = process.env.DISCORD_TOKEN
 const LLM_URL: string | undefined = process.env.LLM_URL

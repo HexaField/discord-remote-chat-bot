@@ -1,6 +1,6 @@
 import fs from 'fs'
-import { callLLM, getEmbedding } from './llm'
-import { debug } from './logger'
+import { callLLM, getEmbedding } from './interfaces/llm'
+import { debug } from './interfaces/logger'
 
 export type RelationshipEntry = {
   subject: string

@@ -1,17 +1,10 @@
 import fsp from 'node:fs/promises'
 import path from 'node:path'
+import { atomicWrite } from '../interfaces/atomicWrite'
 
 // Dedicated graph JSON exporter/loader for nodes, relationships, and statements.
 
 type Relationship = { subject: string; predicate: string; object: string }
-
-async function atomicWrite(filePath: string, data: string) {
-  const dir = path.dirname(filePath)
-  const base = path.basename(filePath)
-  const tmp = path.join(dir, `.${base}.partial`)
-  await fsp.writeFile(tmp, data, 'utf8')
-  await fsp.rename(tmp, filePath)
-}
 
 export function buildStatements(relationships: Relationship[]) {
   const statements: string[] = []

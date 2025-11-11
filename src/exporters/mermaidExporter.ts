@@ -2,7 +2,7 @@ import { renderAsync } from '@resvg/resvg-js'
 import childProcess from 'node:child_process'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
-import { atomicWrite } from '../utils'
+import { atomicWrite } from '../interfaces/atomicWrite'
 
 function sanitizeId(s: string) {
   return s.replace(/[^a-zA-Z0-9_]+/g, '_').replace(/^_+|_+$/g, '') || 'N'

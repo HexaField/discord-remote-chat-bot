@@ -1,7 +1,7 @@
 import childProcess from 'node:child_process'
 import path from 'path'
 import { extractVariables } from '../cld'
-import { atomicWrite } from '../utils'
+import { atomicWrite } from '../interfaces/atomicWrite'
 
 export async function exportGraphViz(dir: string, baseName: string, statements: string[]): Promise<void> {
   const dot = generateDot(statements)

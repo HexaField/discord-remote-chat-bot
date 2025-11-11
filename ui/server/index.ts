@@ -4,7 +4,7 @@ import fs from 'fs'
 import multer from 'multer'
 import path from 'path'
 import audioToDiagram from '../../src/audioToDiagram'
-import { convertToMp3, ensureFfmpegAvailable } from '../../src/ffmpeg'
+import { convertToMp3, ensureFfmpegAvailable } from '../../src/interfaces/ffmpeg'
 
 const app = express()
 app.use(cors())

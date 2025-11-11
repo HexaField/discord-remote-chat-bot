@@ -6,10 +6,10 @@ import path from 'node:path'
 import { generateCausalRelationships } from './cld'
 import exportMermaid from './exporters/mermaidExporter'
 import { exportGraphJSON, loadGraphJSON } from './exporters/rdfExporter'
-import { ensureFfmpegAvailable } from './ffmpeg'
-import { callLLM } from './llm'
-import { debug, info } from './logger'
-import { ensureWhisperAvailable, transcribeWithWhisper } from './whisper'
+import { ensureFfmpegAvailable } from './interfaces/ffmpeg'
+import { callLLM } from './interfaces/llm'
+import { debug, info } from './interfaces/logger'
+import { ensureWhisperAvailable, transcribeWithWhisper } from './interfaces/whisper'
 
 const TMP_DIR = path.resolve(appRootPath.path, '.tmp/audio-to-diagram')
 
