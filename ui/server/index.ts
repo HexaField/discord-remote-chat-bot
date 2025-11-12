@@ -215,7 +215,8 @@ app.get('/api/videos/:id/graph', (req: Request, res: Response) => {
 // an updated graph.json in the same directory.
 app.post('/api/videos/:id/regenerate', async (req: Request, res: Response) => {
   const { id } = req.params
-  const universe = typeof req.query.universe === 'string' ? req.query.universe : undefined
+  const universe = req.query.universe! as string
+  if (!universe) return res.status(400).json({ error: 'Missing universe parameter' })
   const item = readItems(universe).find((v) => v.id === id)
   if (!item) return res.status(404).json({ error: 'Not found' })
   try {
@@ -285,7 +286,7 @@ app.post('/api/videos/:id/regenerate', async (req: Request, res: Response) => {
       if (sourceUrl) {
         persistProgress('Starting full pipeline (audioToDiagram) ...')
         // audioToDiagram returns an object with `dir` where it wrote outputs.
-        const out = await audioToDiagram(sourceUrl, notify, true)
+        const out = await audioToDiagram(universe, sourceUrl, notify, true)
         // If the pipeline produced a graph.json in its output dir, copy it
         // back into the current video directory so the UI will pick up the
         // updated graph in-place.
@@ -539,7 +540,7 @@ app.post('/api/videos/import', upload.array('files'), async (req: Request, res: 
             fs.writeFileSync(dest, f.buffer)
             // call pipeline with file:// URL to the saved transcript
             const fileUrl = `file://${dest}`
-            await audioToDiagram(fileUrl, notify, true)
+            await audioToDiagram(universe, fileUrl, notify, true)
           } else {
             // preserve original file extension (fallback to .mp3)
             const originalExt = path.extname(base) || '.mp3'
@@ -554,7 +555,7 @@ app.post('/api/videos/import', upload.array('files'), async (req: Request, res: 
             }
             // run full pipeline using file:// URL to the saved file
             const fileUrl = `file://${output}`
-            await audioToDiagram(fileUrl, notify, true)
+            await audioToDiagram(universe, fileUrl, notify, true)
           }
           results.push({ file: f.originalname, id, status: 'ok', universe })
         } catch (e: any) {
@@ -580,7 +581,7 @@ app.post('/api/videos/import', upload.array('files'), async (req: Request, res: 
       if (!fs.existsSync(baseDir)) fs.mkdirSync(baseDir, { recursive: true })
       for (const line of lines) {
         try {
-          const out = await audioToDiagram(line, notify, true)
+          const out = await audioToDiagram(universe, line, notify, true)
           // audioToDiagram returns { dir, ... } where dir is the folder it wrote to.
           // Move the generated folder into the selected universe with a safe id.
           try {

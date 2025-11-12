@@ -11,8 +11,6 @@ import { callLLM } from './interfaces/llm'
 import { debug, info } from './interfaces/logger'
 import { ensureWhisperAvailable, transcribeWithWhisper } from './interfaces/whisper'
 
-const TMP_DIR = path.resolve(appRootPath.path, '.tmp/audio-to-diagram')
-
 async function fileExists(p: string) {
   try {
     const stat = await fsp.stat(p)
@@ -306,11 +304,14 @@ function normalizeTranscript(text: string) {
 }
 
 export default async function audioToDiagram(
+  universe: string,
   audioURL: string,
   onProgress?: (message: string) => void | Promise<void>,
   force = false
 ) {
-  await fsp.mkdir(TMP_DIR, { recursive: true })
+  const folder = path.resolve(appRootPath.path, '.tmp/audio-to-diagram', universe)
+
+  await fsp.mkdir(folder, { recursive: true })
 
   // Ensure tools
   // progress persistence: write a `progress.json` into the sourceDir when
@@ -366,7 +367,7 @@ export default async function audioToDiagram(
   // prefer to use that containing directory as the sourceDir so generated
   // artifacts (graph.json, audio.vtt, kumu.json) are colocated with the
   // uploaded file. Otherwise fall back to the normal TMP_DIR/<baseName>.
-  let sourceDir = path.join(TMP_DIR, baseName)
+  let sourceDir = path.join(folder, baseName)
   try {
     if (audioURL.startsWith('file://')) {
       const fp = decodeURIComponent(new URL(audioURL).pathname)

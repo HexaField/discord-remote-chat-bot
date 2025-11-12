@@ -185,7 +185,7 @@ ${table}`
         }
       }
 
-      const { kumuPath, pngPath } = await audioToDiagram(url, onProgress, force)
+      const { kumuPath, pngPath } = await audioToDiagram('discord', url, onProgress, force)
       const diagramData = await fs.readFile(kumuPath, 'utf-8')
       const pngData = await fs.readFile(pngPath)
       return chat.editReply({
