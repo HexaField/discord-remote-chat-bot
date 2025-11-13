@@ -14,6 +14,7 @@ import fs from 'fs/promises'
 import path from 'path'
 import { audioToTranscript, transcriptToDiagrams } from './audioToDiagram'
 import { callLLM } from './interfaces/llm'
+import { debug } from './interfaces/logger'
 import { getActiveRecording, startRecording, stopRecording } from './recording/discord'
 import { startTranscriptionServer } from './recording/server'
 
@@ -273,8 +274,25 @@ ${table}`
                 content: `✅ Transcript ready (ID: ${sess.recordingId}).`,
                 files: [new AttachmentBuilder(Buffer.from(vtt), { name: 'audio.vtt' })]
               })
+              const out = await transcriptToDiagrams('recordings', sess.recordingId, async (m) => {
+                try {
+                  await chat.followUp({ content: `🔄 ${m}` })
+                } catch (e) {
+                  console.warn('onProgress followUp failed', e)
+                }
+              })
+              const diagramData = await fs.readFile(out.kumuPath, 'utf-8')
+              const pngData = await fs.readFile(out.pngPath)
+              await chat.followUp({
+                content: 'Here is the transcript and diagram generated from the recording:',
+                files: [
+                  new AttachmentBuilder(Buffer.from(vtt), { name: 'audio.vtt' }),
+                  new AttachmentBuilder(Buffer.from(diagramData), { name: 'kumu.json' }),
+                  new AttachmentBuilder(pngData, { name: 'diagram.png' })
+                ]
+              })
             } catch (e) {
-              await chat.editReply(`✅ Transcript ready (ID: ${sess.recordingId}). (Attachment read failed) `)
+              debug('Failed to read VTT or send follow-up', e)
             }
           } catch (e: any) {
             try {
