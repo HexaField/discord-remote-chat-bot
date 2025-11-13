@@ -402,54 +402,62 @@ async function getLine(embeddings: number[][], embeddingModel: string, sentences
 async function checkCausalRelationships(entry: RelationshipEntry, retry = 0) {
   const var1 = entry.subject
   const var2 = entry.object
-  const prompt = `Relationship: ${var1} -> ${var2}\nRelevant Text: ${entry.relevant}\nReasoning: ${entry.reasoning}\n\nGiven the above text, select which of the following options are correct (there may be more than one):\n1. increasing ${var1} increases ${var2}\n2. decreasing ${var1} decreases ${var2}\n3. increasing ${var1} decreases ${var2}\n4. decreasing ${var1} increases ${var2}\n\nRespond in JSON with keys 'answers' (a list of numbers) and 'reasoning'.`
+  // const prompt = `Relationship: ${var1} -> ${var2}\nRelevant Text: ${entry.relevant}\nReasoning: ${entry.reasoning}\n\nGiven the above text, select which of the following options are correct (there may be more than one):\n1. increasing ${var1} increases ${var2}\n2. decreasing ${var1} decreases ${var2}\n3. increasing ${var1} decreases ${var2}\n4. decreasing ${var1} increases ${var2}\n\nRespond in JSON with keys 'answers' (a list of numbers) and 'reasoning'.`
 
-  const resp = await callLLM(prompt, '', 'ollama', fastLLMModel)
-  if (!resp.success || !resp.data) {
-    throw new Error('LLM failed while checking causal relationship')
-  }
-  const parsed = loadJson(resp.data)
-  let steps: string[] = []
-  if (parsed && parsed.answers) {
-    try {
-      if (Array.isArray(parsed.answers)) {
-        steps = parsed.answers.map(String)
-      } else if (typeof parsed.answers === 'string') {
-        steps = (parsed.answers.match(/\d+/g) || []).map(String)
-      }
-    } catch (e) {
-      steps = []
-    }
-  }
-  if (steps.length === 0) {
-    const nums = (String(resp.data) || '').match(/\d+/g) || []
-    steps = nums
-  }
+  // const resp = await callLLM(prompt, '', 'ollama', fastLLMModel)
+  // if (!resp.success || !resp.data) {
+  //   throw new Error('LLM failed while checking causal relationship')
+  // }
+  // const parsed = loadJson(resp.data)
+  // let steps: string[] = []
+  // if (parsed && parsed.answers) {
+  //   try {
+  //     if (Array.isArray(parsed.answers)) {
+  //       steps = parsed.answers.map(String)
+  //     } else if (typeof parsed.answers === 'string') {
+  //       steps = (parsed.answers.match(/\d+/g) || []).map(String)
+  //     }
+  //   } catch (e) {
+  //     steps = []
+  //   }
+  // }
+  // if (steps.length === 0) {
+  //   const nums = (String(resp.data) || '').match(/\d+/g) || []
+  //   steps = nums
+  // }
 
-  let predicate = ''
-  if (steps.includes('1') || steps.includes('2')) {
-    predicate = 'positive'
-  } else if (steps.includes('3') || steps.includes('4')) {
-    predicate = 'negative'
-  } else {
-    if (retry < 3) {
-      return await checkCausalRelationships(entry, retry + 1)
-    } else {
-      throw new Error('Could not determine relationship polarity after multiple attempts')
-    }
-  }
+  // let predicate = ''
+  // if (steps.includes('1') || steps.includes('2')) {
+  //   predicate = 'positive'
+  // } else if (steps.includes('3') || steps.includes('4')) {
+  //   predicate = 'negative'
+  // } else {
+  //   if (retry < 3) {
+  //     return await checkCausalRelationships(entry, retry + 1)
+  //   } else {
+  //     throw new Error('Could not determine relationship polarity after multiple attempts')
+  //   }
+  // }
 
-  const verificationReasoning = parsed && parsed.reasoning ? String(parsed.reasoning) : ''
+  // const verificationReasoning = parsed && parsed.reasoning ? String(parsed.reasoning) : ''
+  const predicate =
+    entry.predicateRaw.toLowerCase().includes('negative') ||
+    entry.predicateRaw.toLowerCase().includes('not') ||
+    entry.predicateRaw.toLowerCase().includes('-') ||
+    entry.predicateRaw.toLowerCase().includes('decrease')
+      ? 'negative'
+      : 'positive'
+  // const verificationReasoning = `Determined predicate as '${predicate}' from raw input.`
 
   const out: VerifiedRelationship = {
     subject: var1,
     object: var2,
     predicate,
-    reasoning: `${entry.reasoning}${entry.reasoning && verificationReasoning ? ' | ' : ''}${verificationReasoning}`,
+    reasoning: entry.reasoning,
     relevant: entry.relevant,
     createdAt: entry.createdAt,
     verifiedAt: new Date().toISOString(),
-    provenance: [{ llmRaw: resp.data, verifiedAt: new Date().toISOString() }]
+    provenance: [{ verifiedAt: new Date().toISOString() }]
   }
   return out
 }

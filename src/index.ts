@@ -14,6 +14,8 @@ import fs from 'fs/promises'
 import path from 'path'
 import audioToDiagram from './audioToDiagram'
 import { callLLM } from './interfaces/llm'
+import { getActiveRecording, startRecording, stopRecording } from './recording/discord'
+import { startTranscriptionServer } from './recording/server'
 
 const DISCORD_TOKEN: string | undefined = process.env.DISCORD_TOKEN
 const LLM_URL: string | undefined = process.env.LLM_URL
@@ -30,7 +32,8 @@ if (!LLM_URL) {
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.GuildVoiceStates
     // MessageContent is a privileged intent. If you haven't enabled it in
     // the Developer Portal for this bot, omit it to avoid a "Used disallowed intents" error.
     // GatewayIntentBits.MessageContent,
@@ -40,6 +43,13 @@ const client = new Client({
 
 client.once('ready', async () => {
   console.log(`Logged in as ${client.user?.tag}`)
+
+  // Start local transcription WS server
+  try {
+    await startTranscriptionServer()
+  } catch (e) {
+    console.warn('Transcription server failed to start', e)
+  }
 
   try {
     // Register a simple guild-scoped command if GUILD_ID provided
@@ -56,6 +66,22 @@ client.once('ready', async () => {
               description: 'Your question',
               type: ApplicationCommandOptionType.String, // STRING
               required: true
+            }
+          ]
+        },
+        {
+          name: 'record',
+          description: 'Record the current voice channel',
+          options: [
+            {
+              name: 'start',
+              description: 'Start recording the current voice channel',
+              type: ApplicationCommandOptionType.Subcommand
+            },
+            {
+              name: 'stop',
+              description: 'Stop the active recording',
+              type: ApplicationCommandOptionType.Subcommand
             }
           ]
         },
@@ -79,7 +105,7 @@ client.once('ready', async () => {
         }
       ]
       await client.application.commands.set(commands, guildId as string)
-      console.log('Registered /reflect command in guild', guildId)
+      console.log('Registered slash commands in guild', guildId)
     }
   } catch (err) {
     console.warn('Failed to register commands', err)
@@ -200,6 +226,66 @@ ${table}`
       return chat.editReply({
         content: `Error calling audioToDiagram: ${err?.message ?? String(err)}`
       })
+    }
+  }
+
+  if (chat.commandName === 'record') {
+    const sub = chat.options.getSubcommand(true)
+    const guild = chat.guild
+    if (!guild) return chat.reply({ content: 'This command is only available in servers.', ephemeral: true })
+
+    // Must be a text channel and member must be in a voice channel
+    const member: any = chat.member
+    const voiceCh = member?.voice?.channel
+    if (!voiceCh) return chat.reply({ content: 'Join a voice channel first.', ephemeral: true })
+
+    if (sub === 'start') {
+      if (getActiveRecording(guild.id)) {
+        return chat.reply({ content: 'A recording is already active in this server.', ephemeral: true })
+      }
+      try {
+        const sess = await startRecording(guild.id, voiceCh)
+        return chat.reply(`🎙️ Recording started. ID: ${sess.recordingId}`)
+      } catch (e: any) {
+        return chat.reply({ content: `Failed to start recording: ${e?.message ?? e}`, ephemeral: true })
+      }
+    }
+
+    if (sub === 'stop') {
+      try {
+        const active = getActiveRecording(guild.id)
+        const recordingId = active?.recordingId
+        // Send immediate feedback that we are still transcribing remaining chunks
+        await chat.reply(
+          recordingId
+            ? `⏹️ Recording stopped (ID: ${recordingId}). Transcribing remaining audio…`
+            : '⏹️ Recording stopped. Transcribing remaining audio…'
+        )
+
+        // Finish in background, then edit the reply with the final VTT
+        ;(async () => {
+          try {
+            const sess: any = await stopRecording(guild.id)
+            try {
+              const vtt = await fs.readFile(sess.vttPath)
+              await chat.editReply({
+                content: `✅ Transcript ready (ID: ${sess.recordingId}).`,
+                files: [new AttachmentBuilder(Buffer.from(vtt), { name: 'audio.vtt' })]
+              })
+            } catch (e) {
+              await chat.editReply(`✅ Transcript ready (ID: ${sess.recordingId}). (Attachment read failed) `)
+            }
+          } catch (e: any) {
+            try {
+              await chat.editReply({ content: `❌ Failed to stop/transcribe: ${e?.message ?? e}` })
+            } catch {}
+          }
+        })()
+
+        return
+      } catch (e: any) {
+        return chat.reply({ content: `Failed to stop recording: ${e?.message ?? e}`, ephemeral: true })
+      }
     }
   }
 })

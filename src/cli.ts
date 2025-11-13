@@ -20,7 +20,7 @@ async function cmdTranscribe(input: string, output: string) {
 
   // If input is a YouTube URL, run the full audio->diagram pipeline which will download, transcribe and split
   if (input.includes('youtube.com') || input.includes('youtu.be')) {
-    const res = await audioToDiagram(input, (m) => console.log(m))
+    const res = await audioToDiagram('cli', input, (m) => console.log(m))
     const files = await fsp.readdir(res.dir)
     const txts = files.filter((f) => f.endsWith('.txt'))
     console.log('Transcripts written:')
