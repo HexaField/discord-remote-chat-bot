@@ -3,12 +3,14 @@ import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import audioToDiagram, {
+import {
+  audioToTranscript,
   generateNodes,
   generateRelationships,
   Relationship,
   toKumuJSON,
-  transcribeAudioFile
+  transcribeAudioFile,
+  transcriptToDiagrams
 } from './audioToDiagram'
 import { buildMermaid, exportMermaid } from './exporters/mermaidExporter'
 // audioToDiagram will handle YouTube download+split; whisper is used internally there
@@ -20,7 +22,8 @@ async function cmdTranscribe(input: string, output: string) {
 
   // If input is a YouTube URL, run the full audio->diagram pipeline which will download, transcribe and split
   if (input.includes('youtube.com') || input.includes('youtu.be')) {
-    const res = await audioToDiagram('cli', input, (m) => console.log(m))
+    const id = await audioToTranscript('cli', input, (m) => console.log(m))
+    const res = await transcriptToDiagrams('cli', id, (m) => console.log(m))
     const files = await fsp.readdir(res.dir)
     const txts = files.filter((f) => f.endsWith('.txt'))
     console.log('Transcripts written:')

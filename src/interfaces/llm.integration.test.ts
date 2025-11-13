@@ -59,7 +59,7 @@ describe('LLM CLI integrations', () => {
       expect(exists, `Required CLI '${p.cmd}' not found on PATH`).toBe(true)
 
       // Prepare per-provider session directory under the repo tmp tree
-      const baseTmp = path.join(process.cwd(), '.tmp', 'audio-to-diagram', 'itest-sessions')
+      const baseTmp = path.join(process.cwd(), '.test', 'itest-sessions')
       fs.mkdirSync(baseTmp, { recursive: true })
       const sessionDir = path.join(baseTmp, `${p.provider}-${Date.now()}`)
       fs.mkdirSync(sessionDir, { recursive: true })

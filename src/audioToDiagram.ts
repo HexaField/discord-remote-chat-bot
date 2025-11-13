@@ -303,52 +303,38 @@ function normalizeTranscript(text: string) {
   return text.replace(/\r/g, '').replace(/\n+/g, ' ').replace(/\s+/g, ' ').trim()
 }
 
-export default async function audioToDiagram(
+async function persistProgress(universe: string, id: string, msg: string) {
+  try {
+    const sourceDir = path.resolve(appRootPath.path, '.tmp', universe, id)
+    const out = { status: msg, updated: Date.now() }
+    await fsp.writeFile(path.join(sourceDir, 'progress.json'), JSON.stringify(out, null, 2), 'utf8')
+  } catch (e) {
+    debug('Failed to write progress.json', e)
+  }
+}
+
+const notify = async (universe: string, id: string, msg: string, onProgress = (message: string) => {}) => {
+  // call callback for live updates
+  if (onProgress) {
+    try {
+      await Promise.resolve(onProgress(msg))
+    } catch (e) {
+      debug('onProgress callback failed', e)
+    }
+  }
+  try {
+    await persistProgress(universe, id, msg)
+  } catch (e) {}
+}
+
+export async function audioToTranscript(
   universe: string,
   audioURL: string,
-  onProgress?: (message: string) => void | Promise<void>,
-  force = false
+  onProgress?: (message: string) => void | Promise<void>
 ) {
-  const folder = path.resolve(appRootPath.path, '.tmp/audio-to-diagram', universe)
+  const folder = path.resolve(appRootPath.path, '.tmp', universe)
 
   await fsp.mkdir(folder, { recursive: true })
-
-  // Ensure tools
-  // progress persistence: write a `progress.json` into the sourceDir when
-  // available so the UI can show which item is being processed. We buffer the
-  // most recent message until sourceDir is known.
-  let _sourceDirForProgress: string | null = null
-  let _pendingProgress: string | null = null
-
-  async function _persistProgress(msg: string) {
-    try {
-      if (!_sourceDirForProgress) return
-      const out = { status: msg, updated: Date.now() }
-      await fsp.writeFile(path.join(_sourceDirForProgress, 'progress.json'), JSON.stringify(out, null, 2), 'utf8')
-    } catch (e) {
-      debug('Failed to write progress.json', e)
-    }
-  }
-
-  const notify = async (msg: string) => {
-    // call callback for live updates
-    if (onProgress) {
-      try {
-        await Promise.resolve(onProgress(msg))
-      } catch (e) {
-        debug('onProgress callback failed', e)
-      }
-    }
-    // record pending and persist if possible
-    _pendingProgress = msg
-    try {
-      await _persistProgress(msg)
-    } catch (e) {}
-  }
-
-  await notify('Preparing dependencies (ffmpeg, whisper)…')
-  await ensureFfmpegAvailable()
-  await ensureWhisperAvailable()
 
   const urlPath = audioURL.includes('youtube.com')
     ? new URL(audioURL).searchParams.get('v')!
@@ -383,11 +369,21 @@ export default async function audioToDiagram(
   } catch (e) {
     // ignore URL parsing errors and continue with default sourceDir
   }
+  const transcriptPath = path.join(sourceDir, `audio.vtt`)
+
+  // if transcript already exists, skip processing
+  if (await fileExists(transcriptPath)) {
+    debug('Transcript already exists at', transcriptPath, ', skipping processing')
+    return baseName
+  }
+
   await fsp.mkdir(sourceDir, { recursive: true })
 
+  await notify(universe, baseName, 'Preparing dependencies (ffmpeg, whisper)…', onProgress)
+  await ensureFfmpegAvailable()
+  await ensureWhisperAvailable()
+
   const audioPath = path.join(sourceDir, `audio.${audioFormat}`)
-  const transcriptPath = path.join(sourceDir, `audio.vtt`)
-  const graphJSONPath = path.join(sourceDir, `graph.json`)
   // Support Fathom transcript files (may be local or remote). If the provided
   // audioURL points at a `.fathom.txt` transcript we will download/copy and
   // parse it into the same array-of-sentences (`transcripts`) used below and
@@ -472,7 +468,7 @@ export default async function audioToDiagram(
   }
 
   if (isFathom) {
-    await notify('Detected Fathom transcript; reading and parsing…')
+    await notify(universe, baseName, 'Detected Fathom transcript; reading and parsing…', onProgress)
     const fathomPath = path.join(sourceDir, 'transcript.fathom.txt')
     await fsp.mkdir(sourceDir, { recursive: true })
     await downloadOrCopyFathom(audioURL, fathomPath)
@@ -512,13 +508,13 @@ export default async function audioToDiagram(
     }
   } else {
     // Ensure tools (ffmpeg, whisper) only when we need to process audio
-    await notify('Preparing dependencies (ffmpeg, whisper)…')
+    await notify(universe, baseName, 'Preparing dependencies (ffmpeg, whisper)…', onProgress)
     await ensureFfmpegAvailable()
     await ensureWhisperAvailable()
 
     if (!(await fileExists(audioPath))) {
       // Download strictly using chapter splitting for YouTube; for direct audio URLs, download as-is
-      await notify(`Downloading audio ${audioPath}...`)
+      await notify(universe, baseName, `Downloading audio ${audioPath}...`, onProgress)
       if (audioURL.includes('youtube.com') || audioURL.includes('youtu.be')) {
         // Download a single file + info.json, then transcribe once and split by chapters
         await downloadYoutubeSingleWithInfo(audioURL, sourceDir, audioFormat)
@@ -591,7 +587,41 @@ export default async function audioToDiagram(
     console.log(transcripts)
   }
 
+  // Build metadata: include a simple name derived from the file/base name
+  const metadata: any = {
+    name: originalName || baseName,
+    source: audioURL,
+    created: Date.now()
+  }
+  // For YouTube URLs include a thumbnail link (use video id stored in urlPath)
+  if (audioURL.includes('youtube.com') || audioURL.includes('youtu.be')) {
+    try {
+      const videoId = urlPath
+      if (videoId) metadata.thumbnail = `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`
+    } catch (e) {
+      // ignore
+    }
+  }
+  try {
+    await fsp.writeFile(path.join(sourceDir, 'metadata.json'), JSON.stringify(metadata, null, 2), 'utf8')
+  } catch (e) {
+    debug('Failed to write metadata.json', e)
+  }
+
+  return baseName
+}
+
+export async function transcriptToDiagrams(
+  universe: string,
+  id: string,
+  onProgress?: (message: string) => void | Promise<void>,
+  force = false
+) {
   // Generate nodes and relationships. If a graph JSON exists, load it and use that as the source of truth.
+  const folder = path.resolve(appRootPath.path, '.tmp', universe)
+  const sourceDir = path.join(folder, id)
+
+  const graphJSONPath = path.join(sourceDir, `graph.json`)
 
   let nodes: Array<string | { label?: string; type?: string }> = []
   let relationships: Relationship[] = []
@@ -599,7 +629,7 @@ export default async function audioToDiagram(
   let loadedFromGraph = false
   if ((await fileExists(graphJSONPath)) && !force) {
     try {
-      await notify('Loading existing graph data…')
+      await notify(universe, id, 'Loading existing graph data…', onProgress)
       const parsed = await loadGraphJSON(sourceDir)
       nodes = parsed.nodes
       relationships = parsed.relationships
@@ -610,15 +640,32 @@ export default async function audioToDiagram(
       debug('Failed to load graph JSON, regenerating nodes/relationships', e)
     }
   }
+  const progress = (msg: string) => notify(universe, id, msg, onProgress)
   if (!loadedFromGraph) {
+    const transcripts: string[] = []
+    // read all transcript chunks from VTT
+    const vttPath = path.join(sourceDir, `audio.vtt`)
+    if (!(await fileExists(vttPath))) {
+      throw new Error('Transcript VTT file not found: ' + vttPath)
+    }
+    const vttContent = await fsp.readFile(vttPath, 'utf8')
+    // Regex to capture VTT cues: start --> end then the cue text (non-greedy)
+    const cueRegex =
+      /(\d{2}:\d{2}:\d{2}\.\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}\.\d{3})\s*\n([\s\S]*?)(?=\n\s*\d{2}:\d{2}:\d{2}\.\d{3}\s*-->|$)/gm
+    let cueMatch: RegExpExecArray | null
+    while ((cueMatch = cueRegex.exec(vttContent)) !== null) {
+      const cueText = cueMatch[3].replace(/\n+/g, ' ').trim()
+      if (cueText.length > 0) transcripts.push(cueText)
+    }
+    console.log(`Using ${transcripts.length} transcript chunk(s) for causal relationship extraction`)
     // const useSDB = Boolean(process.env.USE_SYSTEM_DYNAMICS_BOT)
     // let generatedFromSDB = false
     // if (useSDB) {
     //   try {
-    await notify('Extracting causal relationships (System Dynamics Bot)…')
+    await notify(universe, id, 'Extracting causal relationships (System Dynamics Bot)…', onProgress)
     const cld = await generateCausalRelationships(
       transcripts,
-      notify,
+      progress,
       0.85,
       true,
       process.env.SDB_LLM_MODEL,
@@ -646,7 +693,7 @@ export default async function audioToDiagram(
 
   // Filter out any nodes that don't appear in relationships (no subject/object links)
   try {
-    await notify('Filtering disconnected concepts…')
+    await notify(universe, id, 'Filtering disconnected concepts…', onProgress)
     const relNodeSet = new Set<string>()
     for (const r of relationships) {
       if (r.subject) relNodeSet.add(r.subject)
@@ -694,30 +741,30 @@ export default async function audioToDiagram(
   try {
     const needGraph = !((await fileExists(graphJSONPath)) && !force)
     if (needGraph) {
-      info('Writing graph JSON for', baseName)
-      await notify('Writing graph data…')
-      // Build metadata: include a simple name derived from the file/base name
-      const metadata: any = {
-        name: originalName || baseName,
-        source: audioURL,
+      info('Writing graph JSON for', id)
+      await notify(universe, id, 'Writing graph data…', onProgress)
+      // read metadata if it exists
+      let metadata = {
+        name: id,
+        source: id,
         created: Date.now()
       }
-      // For YouTube URLs include a thumbnail link (use video id stored in urlPath)
-      if (audioURL.includes('youtube.com') || audioURL.includes('youtu.be')) {
-        try {
-          const videoId = urlPath
-          if (videoId) metadata.thumbnail = `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`
-        } catch (e) {
-          // ignore
+      try {
+        const metaPath = path.join(sourceDir, 'metadata.json')
+        if (await fileExists(metaPath)) {
+          const raw = await fsp.readFile(metaPath, 'utf8')
+          metadata = JSON.parse(raw)
         }
+      } catch (e) {
+        debug('Failed to read metadata.json', e)
       }
 
       await exportGraphJSON(sourceDir, nodes, relationships, metadata)
     } else {
-      debug('Graph JSON already exists for', baseName)
+      debug('Graph JSON already exists for', id)
     }
   } catch (e: any) {
-    console.warn('Failed to export graph JSON for', baseName, e?.message ?? e)
+    console.warn('Failed to export graph JSON for', id, e?.message ?? e)
   }
 
   const graphType = process.env.DIAGRAM_EXPORTER || 'mermaid' // options: 'mermaid' or 'graphviz'
@@ -730,14 +777,14 @@ export default async function audioToDiagram(
       const needSVG = !(await fileExists(mermaidSVG))
       const needPNG = !(await fileExists(mermaidPNG))
       if (needMDD || needSVG || needPNG || force) {
-        info('Writing mermaid artifacts for', baseName)
-        await notify('Rendering diagram (Mermaid)…')
+        info('Writing mermaid artifacts for', id)
+        await notify(universe, id, 'Rendering diagram (Mermaid)…', onProgress)
         await exportMermaid(sourceDir, 'mermaid', nodes, relationships)
       } else {
-        debug('Mermaid artifacts already exist for', baseName)
+        debug('Mermaid artifacts already exist for', id)
       }
     } catch (e: any) {
-      console.warn('Failed to export mermaid for', baseName, e?.message ?? e)
+      console.warn('Failed to export mermaid for', id, e?.message ?? e)
     }
   }
 
@@ -745,18 +792,16 @@ export default async function audioToDiagram(
   try {
     await fsp.unlink(processingMarker).catch(() => {})
   } catch (e) {
-    debug('Could not finalize markers for', baseName, e)
+    debug('Could not finalize markers for', id, e)
   }
 
   const activePNG = graphType === 'graphviz' ? graphvizPNG : mermaidPNG
   const activeSVG = graphType === 'graphviz' ? graphvizSVG : mermaidSVG
 
-  await notify('Finalizing…')
+  await notify(universe, id, 'Finalizing…', onProgress)
 
   return {
     dir: sourceDir,
-    audioPath,
-    transcriptPath,
     graphJSONPath,
     kumuPath,
     pngPath: activePNG,

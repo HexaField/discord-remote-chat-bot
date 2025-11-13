@@ -3,7 +3,7 @@ import express, { Request, Response } from 'express'
 import fs from 'fs'
 import multer from 'multer'
 import path from 'path'
-import audioToDiagram from '../../src/audioToDiagram'
+import { audioToTranscript, transcriptToDiagrams } from '../../src/audioToDiagram'
 import { convertToMp3, ensureFfmpegAvailable } from '../../src/interfaces/ffmpeg'
 
 const app = express()
@@ -13,7 +13,7 @@ app.use(express.json())
 // Root directory for processed videos. Under this directory each subdirectory is
 // treated as a "universe" containing video folders. For backwards
 // compatibility, existing single-folder setups will still work.
-const DATA_ROOT = path.resolve(process.cwd(), '.tmp', 'audio-to-diagram')
+const DATA_ROOT = path.resolve(process.cwd(), '.tmp')
 
 function listUniverses() {
   if (!fs.existsSync(DATA_ROOT)) return []
@@ -276,7 +276,6 @@ app.post('/api/videos/:id/regenerate', async (req: Request, res: Response) => {
       const audioPath = path.join(dir, 'audio.mp3')
       const fathomPath = path.join(dir, 'transcript.fathom.txt')
       const vttPath = path.join(dir, 'audio.vtt')
-      const transcriptJsonPath = item.transcriptPath ? item.transcriptPath : path.join(dir, 'transcript.json')
 
       if (fs.existsSync(audioPath)) sourceUrl = `file://${audioPath}`
       else if (fs.existsSync(fathomPath)) sourceUrl = `file://${fathomPath}`
@@ -286,7 +285,10 @@ app.post('/api/videos/:id/regenerate', async (req: Request, res: Response) => {
       if (sourceUrl) {
         persistProgress('Starting full pipeline (audioToDiagram) ...')
         // audioToDiagram returns an object with `dir` where it wrote outputs.
-        const out = await audioToDiagram(universe, sourceUrl, notify, true)
+        const id = sourceUrl.endsWith('vtt')
+          ? dir.split('/').pop()!
+          : await audioToTranscript(universe, sourceUrl, notify)
+        const out = await transcriptToDiagrams(universe, id, notify, true)
         // If the pipeline produced a graph.json in its output dir, copy it
         // back into the current video directory so the UI will pick up the
         // updated graph in-place.
@@ -540,7 +542,8 @@ app.post('/api/videos/import', upload.array('files'), async (req: Request, res: 
             fs.writeFileSync(dest, f.buffer)
             // call pipeline with file:// URL to the saved transcript
             const fileUrl = `file://${dest}`
-            await audioToDiagram(universe, fileUrl, notify, true)
+            const id = await audioToTranscript(universe, fileUrl, notify)
+            await transcriptToDiagrams(universe, id, notify, true)
           } else {
             // preserve original file extension (fallback to .mp3)
             const originalExt = path.extname(base) || '.mp3'
@@ -555,7 +558,8 @@ app.post('/api/videos/import', upload.array('files'), async (req: Request, res: 
             }
             // run full pipeline using file:// URL to the saved file
             const fileUrl = `file://${output}`
-            await audioToDiagram(universe, fileUrl, notify, true)
+            const id = await audioToTranscript(universe, fileUrl, notify)
+            await transcriptToDiagrams(universe, id, notify, true)
           }
           results.push({ file: f.originalname, id, status: 'ok', universe })
         } catch (e: any) {
@@ -581,7 +585,8 @@ app.post('/api/videos/import', upload.array('files'), async (req: Request, res: 
       if (!fs.existsSync(baseDir)) fs.mkdirSync(baseDir, { recursive: true })
       for (const line of lines) {
         try {
-          const out = await audioToDiagram(universe, line, notify, true)
+          const id = await audioToTranscript(universe, line, notify)
+          const out = await transcriptToDiagrams(universe, id, notify, true)
           // audioToDiagram returns { dir, ... } where dir is the folder it wrote to.
           // Move the generated folder into the selected universe with a safe id.
           try {

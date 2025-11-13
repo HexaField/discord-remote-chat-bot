@@ -171,7 +171,7 @@ async function processQueue(sess: Session) {
       // finalize per-user WAV: fill trailing silence, close stream and fix header sizes
       const nowNs = sess.endNs ?? process.hrtime.bigint()
       const elapsedNs = nowNs - sess.startNs
-      const endSamples = Math.max(0, Math.floor(Number(elapsedNs) * sess.rate / 1_000_000_000))
+      const endSamples = Math.max(0, Math.floor((Number(elapsedNs) * sess.rate) / 1_000_000_000))
       for (const [, u] of sess.users) {
         try {
           // Fill trailing silence up to session end
@@ -282,7 +282,7 @@ async function handlePcm(recId: string, rate: number, channels: number, pcm: Buf
     // Compute target sample position from wall-clock since session start
     const nowNs = process.hrtime.bigint()
     const elapsedNs = nowNs - sess.startNs
-    const targetSamples = Math.max(0, Math.floor(Number(elapsedNs) * rate / 1_000_000_000))
+    const targetSamples = Math.max(0, Math.floor((Number(elapsedNs) * rate) / 1_000_000_000))
     const gapSamples = targetSamples - (u.samplesWritten || 0)
     if (gapSamples > 0 && u.stream && !(u.stream as any).writableEnded) {
       const zero = Buffer.alloc(Math.min(gapSamples * frameBytes, 1024 * 1024))

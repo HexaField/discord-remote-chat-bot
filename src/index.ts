@@ -12,7 +12,7 @@ import {
 import 'dotenv/config'
 import fs from 'fs/promises'
 import path from 'path'
-import audioToDiagram from './audioToDiagram'
+import { audioToTranscript, transcriptToDiagrams } from './audioToDiagram'
 import { callLLM } from './interfaces/llm'
 import { getActiveRecording, startRecording, stopRecording } from './recording/discord'
 import { startTranscriptionServer } from './recording/server'
@@ -211,7 +211,8 @@ ${table}`
         }
       }
 
-      const { kumuPath, pngPath } = await audioToDiagram('discord', url, onProgress, force)
+      const id = await audioToTranscript('discord', url, onProgress)
+      const { kumuPath, pngPath } = await transcriptToDiagrams('discord', id, onProgress, force)
       const diagramData = await fs.readFile(kumuPath, 'utf-8')
       const pngData = await fs.readFile(pngPath)
       return chat.editReply({

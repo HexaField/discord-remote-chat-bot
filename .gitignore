@@ -4,5 +4,6 @@ dist/
 csvs/
 package-lock.json
 .tmp*
+.test*
 .DS_Store
 .sessions/
