@@ -9,3 +9,5 @@ When adding new functionality, ensure that it integrates seamlessly with existin
 NEVER add stubs or placeholders. All functions and methods must have complete implementations.
 
 Always install dependencies with `npm i package@latest` to ensure the latest version is used.
+
+Run specific tests with `npm test -- path/to/testfile.test.ts`.

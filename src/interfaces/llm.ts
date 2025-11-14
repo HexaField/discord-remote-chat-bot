@@ -340,17 +340,17 @@ export async function callLLM(
   userQuery: string,
   provider = 'ollama',
   model = 'llama3.2',
-  optionsOrRetries?: number | { retries?: number; sessionId?: string; sessionDir?: string }
+  options?: number | { retries?: number; sessionId?: string; sessionDir?: string }
 ): Promise<LLMResponse> {
   let retries = 2
   let sessionId: string | undefined = undefined
   let sessionDir: string | undefined = undefined
-  if (typeof optionsOrRetries === 'number') {
-    retries = optionsOrRetries
-  } else if (typeof optionsOrRetries === 'object' && optionsOrRetries) {
-    if (typeof optionsOrRetries.retries === 'number') retries = optionsOrRetries.retries
-    if (typeof optionsOrRetries.sessionId === 'string') sessionId = optionsOrRetries.sessionId
-    if (typeof (optionsOrRetries as any).sessionDir === 'string') sessionDir = (optionsOrRetries as any).sessionDir
+  if (typeof options === 'number') {
+    retries = options
+  } else if (typeof options === 'object' && options) {
+    if (typeof options.retries === 'number') retries = options.retries
+    if (typeof options.sessionId === 'string') sessionId = options.sessionId
+    if (typeof (options as any).sessionDir === 'string') sessionDir = (options as any).sessionDir
   }
   // Ensure session meta exists when sessionId provided
   if (sessionId) {
