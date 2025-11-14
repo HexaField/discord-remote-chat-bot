@@ -246,19 +246,28 @@ ${table}`
         return chat.reply({ content: 'A recording is already active in this server.', ephemeral: true })
       }
       try {
+        await chat.deferReply()
         const sess = await startRecording(guild.id, voiceCh)
-        return chat.reply(`🎙️ Recording started. ID: ${sess.recordingId}`)
+        return chat.editReply(`🎙️ Recording started. ID: ${sess.recordingId}`)
       } catch (e: any) {
-        return chat.reply({ content: `Failed to start recording: ${e?.message ?? e}`, ephemeral: true })
+        try {
+          await chat.editReply({ content: `Failed to start recording: ${e?.message ?? e}` })
+        } catch {
+          try {
+            await chat.followUp({ content: `Failed to start recording: ${e?.message ?? e}`, ephemeral: true })
+          } catch {}
+        }
+        return
       }
     }
 
     if (sub === 'stop') {
       try {
+        await chat.deferReply()
         const active = getActiveRecording(guild.id)
         const recordingId = active?.recordingId
         // Send immediate feedback that we are still transcribing remaining chunks
-        await chat.reply(
+        await chat.editReply(
           recordingId
             ? `⏹️ Recording stopped (ID: ${recordingId}). Transcribing remaining audio…`
             : '⏹️ Recording stopped. Transcribing remaining audio…'
@@ -298,13 +307,24 @@ ${table}`
           } catch (e: any) {
             try {
               await chat.editReply({ content: `❌ Failed to stop/transcribe: ${e?.message ?? e}` })
-            } catch {}
+            } catch {
+              try {
+                await chat.followUp({ content: `❌ Failed to stop/transcribe: ${e?.message ?? e}` })
+              } catch {}
+            }
           }
         })()
 
         return
       } catch (e: any) {
-        return chat.reply({ content: `Failed to stop recording: ${e?.message ?? e}`, ephemeral: true })
+        try {
+          await chat.editReply({ content: `Failed to stop recording: ${e?.message ?? e}` })
+        } catch {
+          try {
+            await chat.followUp({ content: `Failed to stop recording: ${e?.message ?? e}`, ephemeral: true })
+          } catch {}
+        }
+        return
       }
     }
   }

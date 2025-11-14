@@ -19,6 +19,7 @@ type RecSession = {
   ws: WebSocket
   cleanup: () => Promise<void>
   done: Promise<{ recordingId: string; vttPath: string }>
+  restoreNickname?: () => Promise<void>
 }
 
 const sessions = new Map<string, RecSession>() // by guildId
@@ -63,6 +64,61 @@ export async function startRecording(guildId: string, channel: VoiceBasedChannel
   const decoders = new Map<string, OpusEncoder>()
   const streams = new Map<string, Readable>()
   const userNames = new Map<string, string>()
+  // nickname handling
+  let prevNick: string | null | undefined = undefined
+  let meMember: any = undefined
+  let restoreNicknameFn: (() => Promise<void>) | undefined = undefined
+  try {
+    meMember = channel.guild.members.me ?? undefined
+    if (!meMember) {
+      // best-effort fetch
+      meMember = await channel.guild.members.fetch((channel as any).client?.user?.id).catch(() => undefined)
+    }
+    if (meMember) prevNick = meMember.nickname ?? null
+    // set recording nickname
+    try {
+      const botName =
+        (channel as any).client?.user?.username || (meMember && meMember.user && meMember.user.username) || 'bot'
+      const recNick = `🔴 (Recording) ${botName}`
+      if (meMember && typeof meMember.setNickname === 'function') {
+        await meMember.setNickname(recNick, 'Recording started')
+      }
+    } catch (e) {
+      debug('Failed to set recording nickname', String(e))
+    }
+    // prepare restore function to run later (after transcription completes)
+    restoreNicknameFn = async () => {
+      try {
+        if (meMember && typeof meMember.setNickname === 'function') {
+          // First try to restore the previous nickname exactly
+          await meMember.setNickname(prevNick ?? null, 'Recording ended')
+        }
+      } catch (e) {
+        debug('Failed to restore nickname (first attempt)', String(e))
+      }
+      // If restore failed or wasn't possible, aggressively remove the recording tag
+      try {
+        const botId = (channel as any).client?.user?.id
+        let curMember = channel.guild.members.me ?? undefined
+        if (!curMember && botId) {
+          curMember = await channel.guild.members.fetch(botId).catch(() => undefined)
+        }
+        if (curMember && typeof curMember.setNickname === 'function') {
+          const recMarker = '🔴 (Recording)'
+          const curNick = curMember.nickname ?? (curMember.user && curMember.user.username) ?? ''
+          // Remove common forms of the marker and trim whitespace
+          const newNick = curNick.replace(recMarker, '').trim()
+          if (newNick === '') {
+            await curMember.setNickname(null, 'Remove recording tag')
+          } else {
+            await curMember.setNickname(newNick, 'Remove recording tag')
+          }
+        }
+      } catch (e) {
+        debug('Failed to explicitly remove recording tag', String(e))
+      }
+    }
+  } catch {}
 
   // init connection context (recordingId, rate, channels) for the server
   try {
@@ -159,7 +215,15 @@ export async function startRecording(guildId: string, channel: VoiceBasedChannel
     } catch {}
   }
 
-  const sess: RecSession = { recordingId, guildId: channel.guild.id, channelId: channel.id, ws, cleanup, done }
+  const sess: RecSession = {
+    recordingId,
+    guildId: channel.guild.id,
+    channelId: channel.id,
+    ws,
+    cleanup,
+    done,
+    restoreNickname: restoreNicknameFn
+  }
   sessions.set(guildId, sess)
   return sess
 }
@@ -169,6 +233,13 @@ export async function stopRecording(guildId: string) {
   if (!sess) throw new Error('No active recording')
   await sess.cleanup()
   const result = await sess.done
+  try {
+    if (typeof sess.restoreNickname === 'function') {
+      await sess.restoreNickname()
+    }
+  } catch (e) {
+    debug('restoreNickname failed', e)
+  }
   try {
     sess.ws.close()
   } catch {}
