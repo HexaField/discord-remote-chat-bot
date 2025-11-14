@@ -274,16 +274,17 @@ ${table}`
                 content: `✅ Transcript ready (ID: ${sess.recordingId}).`,
                 files: [new AttachmentBuilder(Buffer.from(vtt), { name: 'audio.vtt' })]
               })
+              const followUp = await chat.followUp({ content: 'Generating diagrams from the transcript…' })
               const out = await transcriptToDiagrams('recordings', sess.recordingId, async (m) => {
                 try {
-                  await chat.followUp({ content: `🔄 ${m}` })
+                  await followUp.edit({ content: `🔄 ${m}` })
                 } catch (e) {
                   console.warn('onProgress followUp failed', e)
                 }
               })
               const diagramData = await fs.readFile(out.kumuPath, 'utf-8')
               const pngData = await fs.readFile(out.pngPath)
-              await chat.followUp({
+              await followUp.edit({
                 content: 'Here is the transcript and diagram generated from the recording:',
                 files: [
                   new AttachmentBuilder(Buffer.from(vtt), { name: 'audio.vtt' }),

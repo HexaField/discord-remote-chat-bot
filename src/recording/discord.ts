@@ -10,6 +10,7 @@ import type { VoiceBasedChannel } from 'discord.js'
 import { encode } from 'msgpackr'
 import type { Readable } from 'node:stream'
 import WebSocket from 'ws'
+import { debug } from '../interfaces/logger'
 
 type RecSession = {
   recordingId: string
@@ -61,6 +62,7 @@ export async function startRecording(guildId: string, channel: VoiceBasedChannel
   const receiver = conn.receiver
   const decoders = new Map<string, OpusEncoder>()
   const streams = new Map<string, Readable>()
+  const userNames = new Map<string, string>()
 
   // init connection context (recordingId, rate, channels) for the server
   try {
@@ -71,6 +73,23 @@ export async function startRecording(guildId: string, channel: VoiceBasedChannel
     const opusStream = receiver.subscribe(userId, {
       end: { behavior: EndBehaviorType.Manual }
     })
+    // try to fetch the member display name for nicer VTT speaker labels
+    try {
+      const member = channel.guild.members.cache.get(userId) ?? undefined
+      if (member) {
+        userNames.set(userId, member.displayName || member.user.username)
+      } else {
+        // try fetch
+        channel.guild.members
+          .fetch(userId)
+          .then((m) => {
+            userNames.set(userId, m.displayName || m.user.username)
+          })
+          .catch(() => {})
+      }
+    } catch {
+      debug(`Failed to fetch member name for userId: ${userId}`)
+    }
     const decoder = new OpusEncoder(48000, 2)
     decoders.set(userId, decoder)
     streams.set(userId, opusStream as unknown as Readable)
@@ -85,6 +104,7 @@ export async function startRecording(guildId: string, channel: VoiceBasedChannel
                 type: 'audio',
                 recordingId,
                 userId,
+                userName: userNames.get(userId) || undefined,
                 payload: pcm,
                 encoding: 's16le',
                 rate: 48000,
@@ -106,8 +126,8 @@ export async function startRecording(guildId: string, channel: VoiceBasedChannel
     if (s) {
       try {
         // explicitly end/destroy manual streams
-        if (typeof (s as any).destroy === 'function') (s as any).destroy()
-        else if (typeof (s as any).push === 'function') (s as any).push(null)
+        if (typeof s.destroy === 'function') s.destroy()
+        else if (typeof s.push === 'function') s.push(null)
       } catch {}
       streams.delete(userId)
     }
@@ -126,8 +146,8 @@ export async function startRecording(guildId: string, channel: VoiceBasedChannel
     try {
       for (const [uid, s] of streams.entries()) {
         try {
-          if (typeof (s as any).destroy === 'function') (s as any).destroy()
-          else if (typeof (s as any).push === 'function') (s as any).push(null)
+          if (typeof s.destroy === 'function') s.destroy()
+          else if (typeof s.push === 'function') s.push(null)
         } catch {}
         streams.delete(uid)
       }

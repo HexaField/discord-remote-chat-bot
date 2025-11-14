@@ -15,6 +15,7 @@ type UserState = {
   bytes: number
   stream: fs.WriteStream | null
   samplesWritten: number
+  userName?: string
 }
 type QueueItem = { userId: string; buf: Buffer }
 
@@ -101,10 +102,11 @@ function secondsToTs(sec: number) {
   return `${pad(h, 2)}:${pad(m, 2)}:${pad(s, 2)}.${pad(ms, 3)}`
 }
 
-async function appendVttWithOffset(destPath: string, chunkPath: string, offsetSec: number) {
+async function appendVttWithOffset(destPath: string, chunkPath: string, offsetSec: number, userName?: string) {
   const raw = await fsp.readFile(chunkPath, 'utf8')
   const lines = raw.split(/\r?\n/)
   const out: string[] = []
+  let expectTextPrefix = false
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i]
     if (l.includes('-->')) {
@@ -112,10 +114,24 @@ async function appendVttWithOffset(destPath: string, chunkPath: string, offsetSe
       const as = tsToSeconds(a.trim()) + offsetSec
       const bs = tsToSeconds(b.trim()) + offsetSec
       out.push(`${secondsToTs(as)} --> ${secondsToTs(bs)}`)
+      // next non-empty line is the cue text; prefix once with speaker
+      expectTextPrefix = true
     } else if (l.trim() === 'WEBVTT') {
       // skip header; we'll write our own on first write
     } else {
-      out.push(l)
+      if (expectTextPrefix && l.trim() !== '') {
+        if (userName) {
+          // prefix with <v Name> marker
+          const safe = String(userName).replace(/<|>/g, '')
+          out.push(`<v ${safe}> ${l}`)
+        } else {
+          out.push(l)
+        }
+        expectTextPrefix = false
+      } else {
+        out.push(l)
+      }
+      if (l.trim() === '') expectTextPrefix = false
     }
   }
   const exists = fs.existsSync(destPath)
@@ -138,7 +154,7 @@ async function processChunk(sess: Session, userId: string, pcmChunk: Buffer) {
   const outBase = vttTmp.replace(/\.vtt$/, '')
   const model = process.env.WHISPER_MODEL || path.join(os.homedir(), 'models/ggml-base.en.bin')
   await transcribeWithWhisper(model, wavTmp, vttTmp, outBase)
-  await appendVttWithOffset(sess.vttPath, vttTmp, u.elapsedSec)
+  await appendVttWithOffset(sess.vttPath, vttTmp, u.elapsedSec, u.userName)
 
   const secs = pcmChunk.length / sess.bytesPerSec
   u.elapsedSec += secs
@@ -275,6 +291,7 @@ async function handlePcm(recId: string, rate: number, channels: number, pcm: Buf
     u = { buf: Buffer.alloc(0), elapsedSec: 0, chunkIndex: 0, wavPath, bytes: 0, stream, samplesWritten: 0 }
     sess.users.set(userId, u)
   }
+  // if caller supplied userName in future, caller should set u.userName
 
   // Append PCM to the continuous WAV stream
   try {
@@ -375,6 +392,18 @@ export async function startTranscriptionServer(port = Number(process.env.AUDIO_W
               if (msg.recordingId) ctx.recId = String(msg.recordingId)
               if (msg.rate) ctx.rate = Number(msg.rate)
               if (msg.channels) ctx.channels = Number(msg.channels)
+              if (msg.userName) {
+                // set userName in user state for VTT speaker labels
+                const recId = String(msg.recordingId || '')
+                const sess = SESSIONS.get(recId)
+                if (sess) {
+                  const userId: string = String(msg.userId || 'unknown')
+                  let u = sess.users.get(userId)
+                  if (u) {
+                    u.userName = String(msg.userName)
+                  }
+                }
+              }
               if (ctx.recId) subscribe(ctx.recId, ws)
               await handleAudioMessage(msg)
               return
