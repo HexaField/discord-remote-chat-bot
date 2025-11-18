@@ -201,7 +201,7 @@ ${table}`
       return chat.editReply('Please provide an audio file attachment or a URL link to an audio file.')
     }
 
-    const force = false //chat.toString().toLowerCase().includes('--force')
+    const force = false //chat.options.getString().toLowerCase().includes('--force')
 
     try {
       const onProgress = async (message: string) => {

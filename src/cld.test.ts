@@ -33,7 +33,7 @@ test('generateCausalRelationships', async () => {
 
   // Run the full CLD extraction 5 times in a row and require validity each time
   for (let i = 0; i < 5; i++) {
-    const result = await generateCausalRelationships([largePrompt], async (msg: string) => {}, 0.85, true)
+    const result = await generateCausalRelationships([largePrompt], async (msg: string) => {}, true)
     console.log(result)
 
     // Expect a non-empty response and structured nodes/relationships

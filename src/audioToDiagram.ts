@@ -1,5 +1,6 @@
 import appRootPath from 'app-root-path'
 import { execFile } from 'node:child_process'
+import { rmSync } from 'node:fs'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -74,15 +75,6 @@ export function toKumuJSON(nodes: Array<string | { label?: string; type?: string
   }
 
   return { elements, connections }
-}
-
-function relationshipsToStatements(relationships: Relationship[]) {
-  const out: string[] = []
-  for (const rel of relationships) {
-    const symbol = rel.predicate.includes('increases') ? '(+)' : rel.predicate.includes('decreases') ? '(-)' : ''
-    out.push(`${rel.subject} --> ${rel.object} ${symbol}`.trim())
-  }
-  return out
 }
 
 async function downloadToFile(url: string, dest: string) {
@@ -346,7 +338,7 @@ export async function audioToTranscript(
   const audioFormat = 'mp3'
 
   const originalName = path.basename(urlPath) || `audio-${Date.now()}`
-  const baseName = path.basename(originalName, path.extname(originalName))
+  let baseName = path.basename(originalName, path.extname(originalName))
 
   // If the input is a local file URL and lives inside an existing folder (for
   // example the import handler saved the file to DATA_ROOT/<universe>/<id>),
@@ -361,13 +353,16 @@ export async function audioToTranscript(
         const stat = await fsp.stat(fp)
         if (stat.isFile()) {
           sourceDir = path.dirname(fp)
+          baseName = path.basename(sourceDir)
+        } else {
+          // not a file, use default
         }
       } catch (e) {
         // if file doesn't exist yet or cannot stat, ignore and use default
       }
     }
   } catch (e) {
-    // ignore URL parsing errors and continue with default sourceDir
+    // ignore malformed URL
   }
   const transcriptPath = path.join(sourceDir, `audio.vtt`)
 
@@ -514,7 +509,7 @@ export async function audioToTranscript(
 
     if (!(await fileExists(audioPath))) {
       // Download strictly using chapter splitting for YouTube; for direct audio URLs, download as-is
-      await notify(universe, baseName, `Downloading audio ${audioPath}...`, onProgress)
+      await notify(universe, baseName, `Downloading audio...`, onProgress)
       if (audioURL.includes('youtube.com') || audioURL.includes('youtu.be')) {
         // Download a single file + info.json, then transcribe once and split by chapters
         await downloadYoutubeSingleWithInfo(audioURL, sourceDir, audioFormat)
@@ -623,9 +618,8 @@ export async function transcriptToDiagrams(
 
   const graphJSONPath = path.join(sourceDir, `graph.json`)
 
-  let nodes: Array<string | { label?: string; type?: string }> = []
+  let nodes: Array<{ label: string; type: string }> = []
   let relationships: Relationship[] = []
-  let statements: string[] = []
   let loadedFromGraph = false
   if ((await fileExists(graphJSONPath)) && !force) {
     try {
@@ -633,7 +627,6 @@ export async function transcriptToDiagrams(
       const parsed = await loadGraphJSON(sourceDir)
       nodes = parsed.nodes
       relationships = parsed.relationships
-      statements = parsed.statements
       loadedFromGraph = true
       debug('Loaded nodes and relationships from graph JSON', graphJSONPath)
     } catch (e) {
@@ -666,10 +659,7 @@ export async function transcriptToDiagrams(
     const cld = await generateCausalRelationships(
       transcripts,
       progress,
-      0.85,
       true,
-      process.env.SDB_LLM_MODEL,
-      process.env.SDB_EMBEDDING_MODEL,
       undefined, // allow generateCausalRelationships to auto-generate sessionId
       sourceDir // sessionDir for per-source persistence
     )
@@ -689,31 +679,6 @@ export async function transcriptToDiagrams(
     //   await notify('Extracting relationships between concepts…')
     //   relationships = await generateRelationships(transcript, nodes)
     // }
-  }
-
-  // Filter out any nodes that don't appear in relationships (no subject/object links)
-  try {
-    await notify(universe, id, 'Filtering disconnected concepts…', onProgress)
-    const relNodeSet = new Set<string>()
-    for (const r of relationships) {
-      if (r.subject) relNodeSet.add(r.subject)
-      if (r.object) relNodeSet.add(r.object)
-    }
-    const before = nodes.length
-    nodes = nodes.filter((n: any) => {
-      const label = typeof n === 'string' ? n : n.label || ''
-      return relNodeSet.has(label)
-    })
-    const after = nodes.length
-    if (before !== after) debug(`Filtered ${before - after} disconnected node(s)`)
-  } catch (e) {
-    // If anything goes wrong, keep the original nodes list to avoid breaking downstream
-    debug('Failed to filter nodes by relationships, keeping original nodes', e)
-  }
-
-  // Ensure statements are available for graphviz exporter and persisted JSON
-  if (statements.length === 0 && relationships.length > 0) {
-    statements = relationshipsToStatements(relationships)
   }
 
   const kumu = toKumuJSON(nodes, relationships)
@@ -739,8 +704,8 @@ export async function transcriptToDiagrams(
 
   // Export graph JSON if missing or empty
   try {
-    const needGraph = !((await fileExists(graphJSONPath)) && !force)
-    if (needGraph) {
+    const needGraph = !(await fileExists(graphJSONPath))
+    if (needGraph || force) {
       info('Writing graph JSON for', id)
       await notify(universe, id, 'Writing graph data…', onProgress)
       // read metadata if it exists
@@ -773,6 +738,10 @@ export async function transcriptToDiagrams(
   if (graphType === 'mermaid') {
     // Export Mermaid if missing
     try {
+      //force rewrite of mermaid artifacts
+      rmSync(mermaidMDD, { force: true })
+      rmSync(mermaidSVG, { force: true })
+      rmSync(mermaidPNG, { force: true })
       const needMDD = !(await fileExists(mermaidMDD))
       const needSVG = !(await fileExists(mermaidSVG))
       const needPNG = !(await fileExists(mermaidPNG))
@@ -788,6 +757,8 @@ export async function transcriptToDiagrams(
     }
   }
 
+  await notify(universe, id, 'Finalizing…', onProgress)
+
   // Remove processing marker
   try {
     await fsp.unlink(processingMarker).catch(() => {})
@@ -797,8 +768,6 @@ export async function transcriptToDiagrams(
 
   const activePNG = graphType === 'graphviz' ? graphvizPNG : mermaidPNG
   const activeSVG = graphType === 'graphviz' ? graphvizSVG : mermaidSVG
-
-  await notify(universe, id, 'Finalizing…', onProgress)
 
   return {
     dir: sourceDir,

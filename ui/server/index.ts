@@ -288,6 +288,7 @@ app.post('/api/videos/:id/regenerate', async (req: Request, res: Response) => {
         const id = sourceUrl.endsWith('vtt')
           ? dir.split('/').pop()!
           : await audioToTranscript(universe, sourceUrl, notify)
+
         const out = await transcriptToDiagrams(universe, id, notify, true)
         // If the pipeline produced a graph.json in its output dir, copy it
         // back into the current video directory so the UI will pick up the

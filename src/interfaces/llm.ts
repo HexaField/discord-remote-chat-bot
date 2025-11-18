@@ -410,12 +410,16 @@ export async function getEmbedding(text: string, model?: string) {
   const payload = { model: embedModel, input: clean }
 
   try {
-    const resp = await axios.post(`${OLLAMA_URL}/api/embed`, payload, { timeout: 60000 })
+    const resp = await axios.post(`${OLLAMA_URL}/api/embed`, payload, { timeout: 120_000 })
     const data = resp.data
 
     // Ollama /api/embed response format: { "embeddings": [[...]] }
-    if (data && Array.isArray(data.embeddings) && data.embeddings[0] && Array.isArray(data.embeddings[0])) {
-      return data.embeddings[0]
+    if (data && Array.isArray(data.embeddings)) {
+      if (data.embeddings[0] && Array.isArray(data.embeddings[0])) {
+        return data.embeddings[0]
+      } else {
+        throw new Error(`No embeddings were returned for text ${text}.`)
+      }
     }
 
     // No fallbacks - fail immediately if embeddings not available

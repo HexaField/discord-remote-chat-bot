@@ -2,18 +2,9 @@ import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { atomicWrite } from '../interfaces/atomicWrite'
 
-// Dedicated graph JSON exporter/loader for nodes, relationships, and statements.
+// Dedicated graph JSON exporter/loader for nodes and relationships.
 
 type Relationship = { subject: string; predicate: string; object: string }
-
-export function buildStatements(relationships: Relationship[]) {
-  const statements: string[] = []
-  for (const rel of relationships) {
-    const symbol = rel.predicate.includes('increases') ? '(+)' : rel.predicate.includes('decreases') ? '(-)' : ''
-    statements.push(`${rel.subject} --> ${rel.object} ${symbol}`.trim())
-  }
-  return statements
-}
 
 export async function exportGraphJSON(dir: string, nodes: any[], relationships: Relationship[], metadata?: any) {
   await fsp.mkdir(dir, { recursive: true })
@@ -45,11 +36,7 @@ export async function loadGraphJSON(dir: string) {
         .filter((r: Relationship) => r.subject && r.predicate && r.object)
     : []
   const metadata: any = parsed?.metadata ?? null
-  const statements: string[] =
-    Array.isArray(parsed?.statements) && parsed.statements.length > 0
-      ? parsed.statements.map(String)
-      : buildStatements(relationships)
-  return { nodes, relationships, statements, metadata }
+  return { nodes, relationships, metadata }
 }
 
 export default exportGraphJSON

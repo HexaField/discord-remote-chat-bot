@@ -1,7 +1,24 @@
 import childProcess from 'node:child_process'
 import path from 'path'
-import { extractVariables } from '../cld'
 import { atomicWrite } from '../interfaces/atomicWrite'
+
+export function extractVariables(relationship: string) {
+  const parts = relationship.split('-->')
+  if (parts.length < 2) return ['', '', '']
+  let var1 = parts[0].trim().toLowerCase()
+  let right = parts[1]
+  let symbol = ''
+  let var2 = right
+    .replace(/\(\+\)|\(-\)/g, (s) => {
+      symbol = s
+      return ''
+    })
+    .trim()
+    .toLowerCase()
+  var1 = var1.replace(/[!.,;:]/g, '')
+  var2 = var2.replace(/[!.,;:]/g, '')
+  return [var1, var2, symbol]
+}
 
 export async function exportGraphViz(dir: string, baseName: string, statements: string[]): Promise<void> {
   const dot = generateDot(statements)
