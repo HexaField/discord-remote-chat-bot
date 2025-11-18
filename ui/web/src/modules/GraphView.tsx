@@ -331,8 +331,8 @@ export default function GraphView(props: {
         const l = lbl.toLowerCase()
         // heuristic: negative predicates contain words like 'not', 'neg', 'false', or explicit '-'
         if (l.includes('not') || l.includes('neg') || l.includes('false') || l.includes('-') || l.startsWith('!'))
-          return '-'
-        return '+'
+          return 'decreases'
+        return ''
       })
 
     // create node groups so label can be centered inside circle

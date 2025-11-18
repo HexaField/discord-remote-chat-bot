@@ -106,8 +106,11 @@ export function buildMermaid(
     if (!rel || typeof rel !== 'object') continue
     const from = rel.subject || ''
     const to = rel.object || ''
-    const label = rel.predicate || ''
-    if (from && to) edgeLines.push(`${sanitize(from)} -- "${String(label).replace(/\"/g, '\\"')}" --> ${sanitize(to)}`)
+    const label = rel.predicate === 'negative' ? 'decreases' : ''
+    if (from && to)
+      edgeLines.push(
+        `${sanitize(from)} ${label ? `-- "${String(label).replace(/\"/g, '\\"')}" -->` : '-->'} ${sanitize(to)}`
+      )
   }
 
   // Map types to colours: drivers=green, obstacles=red, actors=amber, other=blue
