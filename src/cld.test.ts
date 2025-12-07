@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest'
-import { generateCausalRelationships } from './cld'
+import { generateCausalRelationships } from './cld.workflow'
 
 // Increase timeout because real model calls can take longer
 test('generateCausalRelationships', async () => {
