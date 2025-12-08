@@ -232,8 +232,26 @@ export async function generateCausalRelationships(
 ): Promise<CldParserOutput> {
   const workspacePath = os.tmpdir() + `/cld-sessions`
   const onStream = (msg: AgentStreamEvent) => {
-    // onProgress
-    console.log('[CLD Workflow Stream]', msg)
+    switch (msg.role) {
+      case 'summariser':
+        onProgress(`[CLD] Summarising topics...`)
+        break
+      case 'sectioner':
+        onProgress(`[CLD] Sectioning text...`)
+        break
+      case 'extractor':
+        onProgress(`[CLD] Extracting causal statements...`)
+        break
+      case 'classifier':
+        onProgress(`[CLD] Classifying nodes...`)
+        break
+      case 'relator':
+        onProgress(`[CLD] Generating relationships...`)
+        break
+      case 'consolidator':
+        onProgress(`[CLD] Consolidating CLD data...`)
+        break
+    }
   }
   const response = await runAgentWorkflow<CldWorkflowDefinition, RegisteredWorkflowParserSchemas>(
     cldWorkflowDefinition,
