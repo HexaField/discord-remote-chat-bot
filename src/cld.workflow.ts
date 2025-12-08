@@ -1,10 +1,10 @@
-import { AgentStreamEvent, configureWorkflowParsers } from 'hyperagent/src/modules/agent/agent'
-import { runAgentWorkflow, type AgentWorkflowResult } from 'hyperagent/src/modules/agent/agent-orchestrator'
-import type { AgentWorkflowDefinition, WorkflowParserJsonOutput } from 'hyperagent/src/modules/agent/workflow-schema'
+import { AgentStreamEvent, configureWorkflowParsers } from '@hexafield/agent-workflow/agent'
+import { runAgentWorkflow, type AgentWorkflowResult } from '@hexafield/agent-workflow/agent-orchestrator'
+import type { AgentWorkflowDefinition, WorkflowParserJsonOutput } from '@hexafield/agent-workflow/workflow-schema'
 import {
   collectParserSchemasFromDefinitions,
   hydrateWorkflowDefinition
-} from 'hyperagent/src/modules/agent/workflows/index'
+} from '@hexafield/agent-workflow/workflows/index'
 
 import os from 'node:os'
 
