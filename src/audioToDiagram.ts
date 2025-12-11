@@ -609,8 +609,9 @@ export async function audioToTranscript(
 export async function transcriptToDiagrams(
   universe: string,
   id: string,
+  userPrompt?: string,
   onProgress?: (message: string) => void | Promise<void>,
-  force = false
+  force = false,
 ) {
   // Generate nodes and relationships. If a graph JSON exists, load it and use that as the source of truth.
   const folder = path.resolve(appRootPath.path, '.tmp', universe)
@@ -658,6 +659,7 @@ export async function transcriptToDiagrams(
     await notify(universe, id, 'Extracting causal relationships (System Dynamics Bot)…', onProgress)
     const cld = await generateCausalRelationships(
       transcripts,
+      userPrompt,
       progress,
       true,
       undefined, // allow generateCausalRelationships to auto-generate sessionId

@@ -224,6 +224,7 @@ const extractCldOutput = (result: CldWorkflowResult): CldParserOutput | undefine
 
 export async function generateCausalRelationships(
   sentences: string[],
+  userPrompt: string | undefined,
   onProgress: (msg: string) => void,
   verbose = false,
   embeddingModel = 'bge-m3:latest',
@@ -232,7 +233,7 @@ export async function generateCausalRelationships(
 ): Promise<CldParserOutput> {
   const workspacePath = os.tmpdir() + `/cld-sessions`
   const onStream = (msg: AgentStreamEvent) => {
-    switch (msg.role) {
+    switch (msg.step) {
       case 'summariser':
         onProgress(`[CLD] Summarising topics...`)
         break
@@ -253,10 +254,17 @@ export async function generateCausalRelationships(
         break
     }
   }
+
+  let userInstructions = sentences.join('\n')
+
+  if (userPrompt) {
+    userInstructions = `User prompt: ${userPrompt}\n\nSource text:\n${userInstructions}`
+  }
+
   const response = await runAgentWorkflow<CldWorkflowDefinition, RegisteredWorkflowParserSchemas>(
     cldWorkflowDefinition,
     {
-      userInstructions: sentences.join('\n'),
+      userInstructions,
       model: 'github-copilot/gpt-5-mini',
       sessionDir: workspacePath,
       workflowId: cldWorkflowDefinition.id,

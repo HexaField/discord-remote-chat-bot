@@ -103,6 +103,12 @@ client.once('ready', async () => {
               required: false
             },
             {
+              name: 'prompt',
+              description: 'An additional user prompt to guide diagram generation',
+              type: ApplicationCommandOptionType.String, // STRING
+              required: false
+            },
+            {
               name: 'regenerate',
               description: 'Force re-generation of diagrams',
               type: ApplicationCommandOptionType.Boolean, // BOOLEAN
@@ -208,6 +214,7 @@ ${table}`
     }
 
     const regenerate = chat.options.getBoolean('regenerate', false) ?? false
+    const userPrompt = chat.options.getString('prompt', false) ?? undefined
 
     try {
       const onProgress = async (message: string) => {
@@ -219,7 +226,7 @@ ${table}`
       }
 
       const id = await audioToTranscript('discord', url, onProgress)
-      const { kumuPath, pngPath } = await transcriptToDiagrams('discord', id, onProgress, regenerate)
+      const { kumuPath, pngPath } = await transcriptToDiagrams('discord', id, userPrompt, onProgress, regenerate)
       const diagramData = await fs.readFile(kumuPath, 'utf-8')
       const pngData = await fs.readFile(pngPath)
       return chat.editReply({
@@ -280,17 +287,19 @@ ${table}`
         )
 
         // Finish in background, then edit the reply with the final VTT
+
+        const sess: any = await stopRecording(guild.id)
+
+        const vtt = await fs.readFile(sess.vttPath)
+        await chat.editReply({
+          content: `✅ Transcript ready (ID: ${sess.recordingId}).`,
+          files: [new AttachmentBuilder(Buffer.from(vtt), { name: 'audio.vtt' })]
+        })
         ;(async () => {
           try {
-            const sess: any = await stopRecording(guild.id)
             try {
-              const vtt = await fs.readFile(sess.vttPath)
-              await chat.editReply({
-                content: `✅ Transcript ready (ID: ${sess.recordingId}).`,
-                files: [new AttachmentBuilder(Buffer.from(vtt), { name: 'audio.vtt' })]
-              })
               const followUp = await chat.followUp({ content: 'Generating diagrams from the transcript…' })
-              const out = await transcriptToDiagrams('recordings', sess.recordingId, async (m) => {
+              const out = await transcriptToDiagrams('recordings', sess.recordingId, '', async (m) => {
                 try {
                   await followUp.edit({ content: `🔄 ${m}` })
                 } catch (e) {
