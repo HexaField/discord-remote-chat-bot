@@ -20,6 +20,7 @@ type RecSession = {
   cleanup: () => Promise<void>
   done: Promise<{ recordingId: string; vttPath: string }>
   restoreNickname?: () => Promise<void>
+  includeAudio: boolean
 }
 
 const sessions = new Map<string, RecSession>() // by guildId
@@ -28,7 +29,7 @@ function utcStamp() {
   return new Date().toISOString().replace(/[:.]/g, '-')
 }
 
-export async function startRecording(guildId: string, channel: VoiceBasedChannel) {
+export async function startRecording(guildId: string, channel: VoiceBasedChannel, includeAudio = false) {
   if (sessions.has(guildId)) throw new Error('Recording already active in this guild')
 
   const recordingId = `${channel.id}-${utcStamp()}`
@@ -122,7 +123,7 @@ export async function startRecording(guildId: string, channel: VoiceBasedChannel
 
   // init connection context (recordingId, rate, channels) for the server
   try {
-    ws.send(encode({ type: 'init', recordingId, rate: 48000, channels: 2 }))
+    ws.send(encode({ type: 'init', recordingId, rate: 48000, channels: 2, includeAudio }))
   } catch {}
 
   const onStart = (userId: string) => {
@@ -222,7 +223,8 @@ export async function startRecording(guildId: string, channel: VoiceBasedChannel
     ws,
     cleanup,
     done,
-    restoreNickname: restoreNicknameFn
+    restoreNickname: restoreNicknameFn,
+    includeAudio
   }
   sessions.set(guildId, sess)
   return sess

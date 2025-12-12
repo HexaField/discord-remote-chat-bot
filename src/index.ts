@@ -224,7 +224,15 @@ client.once('ready', async () => {
             {
               name: 'start',
               description: 'Start recording the current voice channel',
-              type: ApplicationCommandOptionType.Subcommand
+              type: ApplicationCommandOptionType.Subcommand,
+              options: [
+                {
+                  name: 'include_audio',
+                  description: 'Persist speaker .wav files (default: off)',
+                  type: ApplicationCommandOptionType.Boolean,
+                  required: false
+                }
+              ]
             },
             {
               name: 'stop',
@@ -483,7 +491,8 @@ ${table}`
       }
       try {
         await chat.deferReply()
-        const sess = await startRecording(guild.id, voiceCh)
+        const includeAudio = chat.options.getBoolean('include_audio', false) ?? false
+        const sess = await startRecording(guild.id, voiceCh, includeAudio)
         return chat.editReply(`🎙️ Recording started. ID: ${sess.recordingId}`)
       } catch (e: any) {
         try {

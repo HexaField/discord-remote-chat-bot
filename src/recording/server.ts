@@ -27,6 +27,7 @@ type Session = {
   bytesPerChunk: number
   dir: string
   vttPath: string
+  includeAudio: boolean
   users: Map<string, UserState>
   queue: QueueItem[]
   processing: boolean
@@ -37,6 +38,7 @@ type Session = {
 
 const SESSIONS = new Map<string, Session>()
 const SUBSCRIBERS = new Map<string, Set<WebSocket>>()
+const SESSION_PREFS = new Map<string, { includeAudio: boolean }>()
 
 function subscribe(recId: string, ws: WebSocket) {
   if (!SUBSCRIBERS.has(recId)) SUBSCRIBERS.set(recId, new Set())
@@ -189,43 +191,47 @@ async function processQueue(sess: Session) {
       const elapsedNs = nowNs - sess.startNs
       const endSamples = Math.max(0, Math.floor((Number(elapsedNs) * sess.rate) / 1_000_000_000))
       for (const [, u] of sess.users) {
-        try {
-          // Fill trailing silence up to session end
-          const frameBytes = sess.channels * 2
-          const remainingSamples = endSamples - (u.samplesWritten || 0)
-          if (remainingSamples > 0 && u.stream && !(u.stream as any).writableEnded) {
-            const zero = Buffer.alloc(Math.min(remainingSamples * frameBytes, 1024 * 1024))
-            let toWrite = remainingSamples * frameBytes
-            while (toWrite > 0) {
-              const n = Math.min(toWrite, zero.length)
-              u.stream.write(zero.subarray(0, n))
-              u.bytes += n
-              toWrite -= n
-            }
-            u.samplesWritten += remainingSamples
-          }
-          if (u.stream) {
-            await new Promise<void>((resolve) => {
-              try {
-                u.stream!.end(() => resolve())
-              } catch {
-                resolve()
-              }
-            })
-          }
+        if (sess.includeAudio) {
           try {
-            const fh = await fsp.open(u.wavPath, 'r+')
-            const dataSize = u.bytes
-            const riffSize = 36 + dataSize
-            const b1 = Buffer.alloc(4)
-            b1.writeUInt32LE(riffSize, 0)
-            await fh.write(b1, 0, 4, 4)
-            const b2 = Buffer.alloc(4)
-            b2.writeUInt32LE(dataSize, 0)
-            await fh.write(b2, 0, 4, 40)
-            await fh.close()
+            // Fill trailing silence up to session end
+            const frameBytes = sess.channels * 2
+            const remainingSamples = endSamples - (u.samplesWritten || 0)
+            if (remainingSamples > 0 && u.stream && !(u.stream as any).writableEnded) {
+              const zero = Buffer.alloc(Math.min(remainingSamples * frameBytes, 1024 * 1024))
+              let toWrite = remainingSamples * frameBytes
+              while (toWrite > 0) {
+                const n = Math.min(toWrite, zero.length)
+                u.stream.write(zero.subarray(0, n))
+                u.bytes += n
+                toWrite -= n
+              }
+              u.samplesWritten += remainingSamples
+            }
+            if (u.stream) {
+              await new Promise<void>((resolve) => {
+                try {
+                  u.stream!.end(() => resolve())
+                } catch {
+                  resolve()
+                }
+              })
+            }
+            try {
+              const fh = await fsp.open(u.wavPath, 'r+')
+              const dataSize = u.bytes
+              const riffSize = 36 + dataSize
+              const b1 = Buffer.alloc(4)
+              b1.writeUInt32LE(riffSize, 0)
+              await fh.write(b1, 0, 4, 4)
+              const b2 = Buffer.alloc(4)
+              b2.writeUInt32LE(dataSize, 0)
+              await fh.write(b2, 0, 4, 40)
+              await fh.close()
+            } catch {}
           } catch {}
-        } catch {}
+        } else {
+          // No WAV persistence requested; nothing to finalize
+        }
       }
       // clear user maps
       sess.users.clear()
@@ -243,6 +249,9 @@ async function processQueue(sess: Session) {
       } catch {}
       try {
         SUBSCRIBERS.delete(sess.id)
+      } catch {}
+      try {
+        SESSION_PREFS.delete(sess.id)
       } catch {}
       // drop from session map
       try {
@@ -263,6 +272,7 @@ async function handlePcm(recId: string, rate: number, channels: number, pcm: Buf
     const dir = path.resolve(process.cwd(), '.tmp', 'recordings', recId)
     ensureDir(dir)
     const vttPath = path.join(dir, 'audio.vtt')
+    const includeAudio = SESSION_PREFS.get(recId)?.includeAudio ?? false
     sess = {
       id: recId,
       rate,
@@ -271,6 +281,7 @@ async function handlePcm(recId: string, rate: number, channels: number, pcm: Buf
       bytesPerChunk: rate * channels * 2 * 10,
       dir,
       vttPath,
+      includeAudio,
       users: new Map<string, UserState>(),
       queue: [],
       processing: false,
@@ -280,39 +291,51 @@ async function handlePcm(recId: string, rate: number, channels: number, pcm: Buf
     SESSIONS.set(recId, sess)
   }
 
-  let u = sess.users.get(userId)
+  const session = sess
+
+  let u = session.users.get(userId)
   if (!u) {
-    const wavPath = path.join(sess.dir, `${userId}.wav`)
-    const stream = fs.createWriteStream(wavPath, { flags: 'w' })
-    const header = makeWav(Buffer.alloc(0), rate, channels)
-    try {
-      stream.write(header)
-    } catch {}
-    u = { buf: Buffer.alloc(0), elapsedSec: 0, chunkIndex: 0, wavPath, bytes: 0, stream, samplesWritten: 0 }
-    sess.users.set(userId, u)
+    const wavPath = path.join(session.dir, `${userId}.wav`)
+    const stream = session.includeAudio ? fs.createWriteStream(wavPath, { flags: 'w' }) : null
+    if (stream) {
+      const header = makeWav(Buffer.alloc(0), rate, channels)
+      try {
+        stream.write(header)
+      } catch {}
+    }
+    u = {
+      buf: Buffer.alloc(0),
+      elapsedSec: 0,
+      chunkIndex: 0,
+      wavPath,
+      bytes: 0,
+      stream,
+      samplesWritten: 0
+    }
+    session.users.set(userId, u)
   }
   // if caller supplied userName in future, caller should set u.userName
 
   // Append PCM to the continuous WAV stream
   try {
-    const frameBytes = channels * 2
-    // Compute target sample position from wall-clock since session start
-    const nowNs = process.hrtime.bigint()
-    const elapsedNs = nowNs - sess.startNs
-    const targetSamples = Math.max(0, Math.floor((Number(elapsedNs) * rate) / 1_000_000_000))
-    const gapSamples = targetSamples - (u.samplesWritten || 0)
-    if (gapSamples > 0 && u.stream && !(u.stream as any).writableEnded) {
-      const zero = Buffer.alloc(Math.min(gapSamples * frameBytes, 1024 * 1024))
-      let toWrite = gapSamples * frameBytes
-      while (toWrite > 0) {
-        const n = Math.min(toWrite, zero.length)
-        u.stream.write(zero.subarray(0, n))
-        u.bytes += n
-        toWrite -= n
+    if (session.includeAudio && u.stream && !(u.stream as any).writableEnded) {
+      const frameBytes = channels * 2
+      // Compute target sample position from wall-clock since session start
+      const nowNs = process.hrtime.bigint()
+      const elapsedNs = nowNs - session.startNs
+      const targetSamples = Math.max(0, Math.floor((Number(elapsedNs) * rate) / 1_000_000_000))
+      const gapSamples = targetSamples - (u.samplesWritten || 0)
+      if (gapSamples > 0) {
+        const zero = Buffer.alloc(Math.min(gapSamples * frameBytes, 1024 * 1024))
+        let toWrite = gapSamples * frameBytes
+        while (toWrite > 0) {
+          const n = Math.min(toWrite, zero.length)
+          u.stream.write(zero.subarray(0, n))
+          u.bytes += n
+          toWrite -= n
+        }
+        u.samplesWritten += gapSamples
       }
-      u.samplesWritten += gapSamples
-    }
-    if (u.stream && !(u.stream as any).writableEnded) {
       u.stream.write(pcm)
       u.bytes += pcm.length
       u.samplesWritten += Math.floor(pcm.length / frameBytes)
@@ -320,13 +343,13 @@ async function handlePcm(recId: string, rate: number, channels: number, pcm: Buf
   } catch {}
 
   u.buf = Buffer.concat([u.buf, pcm])
-  while (u.buf.length >= sess.bytesPerChunk) {
-    const { head, tail } = takeBytes(u.buf, sess.bytesPerChunk)
-    sess.queue.push({ userId, buf: head })
+  while (u.buf.length >= session.bytesPerChunk) {
+    const { head, tail } = takeBytes(u.buf, session.bytesPerChunk)
+    session.queue.push({ userId, buf: head })
     u.buf = tail
   }
   // kick queue processor asynchronously
-  void processQueue(sess)
+  void processQueue(session)
 }
 
 async function handleAudioMessage(msg: any) {
@@ -381,6 +404,9 @@ export async function startTranscriptionServer(port = Number(process.env.AUDIO_W
               if (msg.recordingId) ctx.recId = String(msg.recordingId)
               if (msg.rate) ctx.rate = Number(msg.rate)
               if (msg.channels) ctx.channels = Number(msg.channels)
+              if (msg.recordingId) {
+                SESSION_PREFS.set(String(msg.recordingId), { includeAudio: Boolean(msg.includeAudio) })
+              }
               if (ctx.recId) subscribe(ctx.recId, ws)
               return
             }
