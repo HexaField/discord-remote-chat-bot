@@ -4,7 +4,7 @@ import { rmSync } from 'node:fs'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { generateCausalRelationships } from './cld.workflow'
+import { generateCausalRelationships } from './cld/cld.workflow'
 import exportMermaid from './exporters/mermaidExporter'
 import { exportGraphJSON, loadGraphJSON } from './exporters/rdfExporter'
 import { ensureFfmpegAvailable } from './interfaces/ffmpeg'
@@ -611,7 +611,7 @@ export async function transcriptToDiagrams(
   id: string,
   userPrompt?: string,
   onProgress?: (message: string) => void | Promise<void>,
-  force = false,
+  force = false
 ) {
   // Generate nodes and relationships. If a graph JSON exists, load it and use that as the source of truth.
   const folder = path.resolve(appRootPath.path, '.tmp', universe)

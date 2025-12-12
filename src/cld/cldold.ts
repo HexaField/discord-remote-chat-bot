@@ -1,5 +1,5 @@
-import { callLLM } from './interfaces/llm'
-import { debug } from './interfaces/logger'
+import { callLLM } from '../interfaces/llm'
+import { debug } from '../interfaces/logger'
 
 export type RelationshipEntry = {
   subject: string
