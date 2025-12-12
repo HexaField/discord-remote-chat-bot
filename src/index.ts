@@ -183,10 +183,8 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.GuildVoiceStates
-    // MessageContent is a privileged intent. If you haven't enabled it in
-    // the Developer Portal for this bot, omit it to avoid a "Used disallowed intents" error.
-    // GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildVoiceStates,
+    GatewayIntentBits.MessageContent
   ],
   partials: [Partials.Channel]
 })
