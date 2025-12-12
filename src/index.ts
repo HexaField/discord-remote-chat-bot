@@ -7,19 +7,19 @@ import {
   Client,
   GatewayIntentBits,
   Interaction,
+  Message,
   Partials
 } from 'discord.js'
 import 'dotenv/config'
 import fs from 'fs/promises'
 import path from 'path'
 import {
-  answerTranscriptQuestion,
-  ASKVIDEO_CONSTANTS,
-  cloneAskVideoContext,
-  getAskVideoContext,
-  loadTranscriptText,
-  rememberAskVideoContext
-} from './askVideo'
+  answerQuestion,
+  ASKQUESTION_CONSTANTS,
+  cloneAskQuestionContext,
+  getAskQuestionContext,
+  rememberAskQuestionContext
+} from './askQuestion'
 import { audioToTranscript, transcriptToDiagrams } from './audioToDiagram'
 import { callLLM } from './interfaces/llm'
 import { debug } from './interfaces/logger'
@@ -28,6 +28,43 @@ import { startTranscriptionServer } from './recording/server'
 
 const DISCORD_TOKEN: string | undefined = process.env.DISCORD_TOKEN
 const LLM_URL: string | undefined = process.env.LLM_URL
+
+const TEXT_ATTACHMENT_EXTENSIONS = new Set(['txt', 'md', 'markdown', 'csv', 'json', 'log', 'yaml', 'yml', 'xml'])
+
+const isTextAttachment = (name?: string | null, contentType?: string | null) => {
+  const lowerName = name?.toLowerCase() ?? ''
+  const ext = lowerName.includes('.') ? lowerName.slice(lowerName.lastIndexOf('.') + 1) : ''
+  return Boolean(contentType?.startsWith('text/')) || (ext ? TEXT_ATTACHMENT_EXTENSIONS.has(ext) : false)
+}
+
+async function buildReferencedMessageContext(message: Message) {
+  if (!message.reference?.messageId) return ''
+
+  try {
+    const referenced = await message.fetchReference()
+    const parts: string[] = []
+    if (referenced.content) parts.push(referenced.content)
+
+    const attachmentTexts: string[] = []
+    for (const attachment of referenced.attachments.values()) {
+      if (!isTextAttachment(attachment.name, attachment.contentType)) continue
+      try {
+        const res = await fetch(attachment.url)
+        if (!res.ok) throw new Error(`Failed to fetch attachment (${res.status})`)
+        const text = await res.text()
+        attachmentTexts.push(`Attachment ${attachment.name ?? 'file'}:\n${text}`)
+      } catch (e) {
+        console.warn('Failed to download referenced attachment', e)
+      }
+    }
+
+    if (attachmentTexts.length) parts.push(attachmentTexts.join('\n\n'))
+    return parts.join('\n\n')
+  } catch (e) {
+    console.warn('Failed to fetch referenced message', e)
+    return ''
+  }
+}
 
 if (!DISCORD_TOKEN) {
   console.error('Missing DISCORD_TOKEN in environment')
@@ -120,36 +157,6 @@ client.once('ready', async () => {
               name: 'regenerate',
               description: 'Force re-generation of diagrams',
               type: ApplicationCommandOptionType.Boolean, // BOOLEAN
-              required: false
-            }
-          ]
-        },
-        {
-          name: 'query',
-          description: 'Ask a question about a YouTube video or audio file',
-          options: [
-            {
-              name: 'question',
-              description: 'What do you want to know about the audio/video?',
-              type: ApplicationCommandOptionType.String,
-              required: true
-            },
-            {
-              name: 'audio',
-              description: 'The audio file to analyze',
-              type: ApplicationCommandOptionType.Attachment,
-              required: false
-            },
-            {
-              name: 'url',
-              description: 'A URL to a YouTube video or audio file',
-              type: ApplicationCommandOptionType.String,
-              required: false
-            },
-            {
-              name: 'prompt',
-              description: 'Additional instructions for the answer',
-              type: ApplicationCommandOptionType.String,
               required: false
             }
           ]
@@ -282,63 +289,6 @@ ${table}`
     }
   }
 
-  if (chat.commandName === 'query') {
-    const attachment = chat.options.getAttachment('audio', false)
-    const url = chat.options.getString('url', false)
-    const question = chat.options.getString('question', true)
-
-    if (!attachment && !url) {
-      return chat.reply('Please provide an audio file attachment or a URL link to an audio/video file.')
-    }
-
-    await chat.deferReply()
-
-    const sourceUrl = attachment?.url ?? (url as string)
-    try {
-      const onProgress = async (message: string) => {
-        try {
-          await chat.editReply({ content: `🔄 ${message}` })
-        } catch (e) {
-          console.warn('askvideo onProgress editReply failed', e)
-        }
-      }
-
-      const sourceId = await audioToTranscript(ASKVIDEO_CONSTANTS.UNIVERSE, sourceUrl, onProgress)
-      const transcript = await loadTranscriptText(ASKVIDEO_CONSTANTS.UNIVERSE, sourceId)
-
-      const threadKey = chat.channel?.isThread?.() ? chat.channelId : undefined
-      const priorContext = await getAskVideoContext(threadKey)
-
-      const answer = await answerTranscriptQuestion({
-        transcript,
-        question,
-        sessionId: priorContext?.sessionId,
-        sessionDir: priorContext?.sessionDir,
-        model: ASKVIDEO_CONSTANTS.MODEL,
-        sourceId
-      })
-
-      const reply = await chat.editReply({
-        content: `**Question**\n${question}\n**About** ${sourceUrl}\n\n**Answer**\n${answer.answer}`
-      })
-
-      const cacheKey = threadKey ?? (reply as any).id
-      await rememberAskVideoContext(cacheKey, {
-        sessionId: answer.sessionId,
-        sessionDir: answer.sessionDir,
-        transcript,
-        sourceId
-      })
-
-      return
-    } catch (err: any) {
-      console.error('askvideo handler error', err)
-      return chat.editReply({
-        content: `Error answering video/audio question: ${err?.message ?? String(err)}`
-      })
-    }
-  }
-
   if (chat.commandName === 'record') {
     const sub = chat.options.getSubcommand(true)
     const guild = chat.guild
@@ -443,12 +393,19 @@ ${table}`
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return
 
+  const botId = client.user?.id
+  const isMention = botId ? message.mentions.has(botId) : false
   const contextKey = message.channel?.isThread?.() ? message.channelId : message.reference?.messageId
-  const context = await getAskVideoContext(contextKey)
-  if (!context) return
+  const existingContext = await getAskQuestionContext(contextKey)
 
-  const question = message.content?.trim()
+  if (!isMention && !existingContext) return
+
+  const raw = message.content || ''
+  const cleaned = botId ? raw.replace(new RegExp(`<@!?${botId}>`, 'g'), '').trim() : raw.trim()
+  const question = cleaned || raw.trim()
   if (!question) return
+
+  const referencedContext = await buildReferencedMessageContext(message)
 
   try {
     await message.channel.sendTyping()
@@ -457,26 +414,31 @@ client.on('messageCreate', async (message) => {
   }
 
   try {
-    const answer = await answerTranscriptQuestion({
-      transcript: context.transcript,
+    const transcriptParts = [] as string[]
+    if (existingContext?.transcript) transcriptParts.push(existingContext.transcript)
+    if (referencedContext) transcriptParts.push(referencedContext)
+    if (!transcriptParts.length) transcriptParts.push(question)
+    const transcript = transcriptParts.join('\n\n')
+    const answer = await answerQuestion({
+      transcript,
       question,
-      sessionId: context.sessionId,
-      sessionDir: context.sessionDir,
-      model: ASKVIDEO_CONSTANTS.MODEL,
-      sourceId: context.sourceId
+      sessionId: existingContext?.sessionId,
+      sessionDir: existingContext?.sessionDir,
+      model: ASKQUESTION_CONSTANTS.MODEL,
+      sourceId: existingContext?.sourceId ?? 'text'
     })
 
-    await message.reply({ content: `**Question**\n${question}\n\n**Answer**\n${answer.answer}` })
+    await message.reply({ content: answer.answer })
 
-    const targetKey = message.channel?.isThread?.() ? message.channelId : contextKey
-    await rememberAskVideoContext(targetKey as string, {
+    const targetKey = message.channel?.isThread?.() ? message.channelId : contextKey || message.id
+    await rememberAskQuestionContext(targetKey as string, {
       sessionId: answer.sessionId,
       sessionDir: answer.sessionDir,
-      transcript: context.transcript,
-      sourceId: context.sourceId
+      transcript,
+      sourceId: existingContext?.sourceId ?? 'text'
     })
   } catch (err: any) {
-    console.error('askvideo follow-up error', err)
+    console.error('askquestion follow-up error', err)
     try {
       await message.reply({
         content: `Error processing follow-up: ${err?.message ?? String(err)}`
@@ -489,7 +451,7 @@ client.on('threadCreate', async (thread) => {
   try {
     const starter = await thread.fetchStarterMessage()
     if (!starter) return
-    await cloneAskVideoContext((starter as any).id, thread.id)
+    await cloneAskQuestionContext((starter as any).id, thread.id)
   } catch (e) {
     console.warn('threadCreate handler failed', e)
   }

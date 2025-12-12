@@ -3,14 +3,14 @@ import appRootPath from 'app-root-path'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 
-export type AskVideoContext = {
+export type AskQuestionContext = {
   sessionId: string
   sessionDir: string
   transcript: string
   sourceId: string
 }
 
-const DEFAULT_MODEL = process.env.ASKVIDEO_MODEL || 'github-copilot/gpt-5-mini'
+const DEFAULT_MODEL = process.env.ASKQUESTION_MODEL || process.env.ASKVIDEO_MODEL || 'github-copilot/gpt-5-mini'
 const DEFAULT_UNIVERSE = 'discord'
 const DEFAULT_SESSION_DIR = path.resolve(appRootPath.path, '.tmp', `${DEFAULT_UNIVERSE}-sessions`)
 const CONTEXT_DIR = path.join(DEFAULT_SESSION_DIR, 'context')
@@ -44,22 +44,22 @@ async function ensureSession(sessionId?: string, sessionDir = DEFAULT_SESSION_DI
   return { ...created, directory: sessionDir }
 }
 
-async function readContext(key: string): Promise<AskVideoContext | undefined> {
+async function readContext(key: string): Promise<AskQuestionContext | undefined> {
   try {
     const raw = await fsp.readFile(contextPathFor(key), 'utf8')
-    return JSON.parse(raw) as AskVideoContext
+    return JSON.parse(raw) as AskQuestionContext
   } catch (e: any) {
     if (e?.code === 'ENOENT') return undefined
     throw e
   }
 }
 
-async function writeContext(key: string, context: AskVideoContext) {
+async function writeContext(key: string, context: AskQuestionContext) {
   await fsp.mkdir(CONTEXT_DIR, { recursive: true })
   await fsp.writeFile(contextPathFor(key), JSON.stringify(context, null, 2), 'utf8')
 }
 
-export async function answerTranscriptQuestion(options: {
+export async function answerQuestion(options: {
   transcript: string
   question: string
   sessionId?: string
@@ -84,26 +84,26 @@ export async function answerTranscriptQuestion(options: {
     sessionDir,
     parts: response.parts ?? [],
     transcript: options.transcript,
-    sourceId: options.sourceId || (session as any).title || 'audio'
+    sourceId: options.sourceId || (session as any).title || 'text'
   }
 }
 
-export async function rememberAskVideoContext(key: string, context: AskVideoContext) {
+export async function rememberAskQuestionContext(key: string, context: AskQuestionContext) {
   await writeContext(key, context)
 }
 
-export async function getAskVideoContext(key?: string) {
+export async function getAskQuestionContext(key?: string) {
   if (!key) return undefined
   return readContext(key)
 }
 
-export async function cloneAskVideoContext(fromKey: string | undefined, toKey: string | undefined) {
+export async function cloneAskQuestionContext(fromKey: string | undefined, toKey: string | undefined) {
   if (!fromKey || !toKey) return
   const ctx = await readContext(fromKey)
   if (ctx) await writeContext(toKey, ctx)
 }
 
-export const ASKVIDEO_CONSTANTS = {
+export const ASKQUESTION_CONSTANTS = {
   MODEL: DEFAULT_MODEL,
   UNIVERSE: DEFAULT_UNIVERSE,
   SESSION_DIR: DEFAULT_SESSION_DIR
