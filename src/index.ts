@@ -12,6 +12,14 @@ import {
 import 'dotenv/config'
 import fs from 'fs/promises'
 import path from 'path'
+import {
+  answerTranscriptQuestion,
+  ASKVIDEO_CONSTANTS,
+  cloneAskVideoContext,
+  getAskVideoContext,
+  loadTranscriptText,
+  rememberAskVideoContext
+} from './askVideo'
 import { audioToTranscript, transcriptToDiagrams } from './audioToDiagram'
 import { callLLM } from './interfaces/llm'
 import { debug } from './interfaces/logger'
@@ -112,6 +120,36 @@ client.once('ready', async () => {
               name: 'regenerate',
               description: 'Force re-generation of diagrams',
               type: ApplicationCommandOptionType.Boolean, // BOOLEAN
+              required: false
+            }
+          ]
+        },
+        {
+          name: 'query',
+          description: 'Ask a question about a YouTube video or audio file',
+          options: [
+            {
+              name: 'question',
+              description: 'What do you want to know about the audio/video?',
+              type: ApplicationCommandOptionType.String,
+              required: true
+            },
+            {
+              name: 'audio',
+              description: 'The audio file to analyze',
+              type: ApplicationCommandOptionType.Attachment,
+              required: false
+            },
+            {
+              name: 'url',
+              description: 'A URL to a YouTube video or audio file',
+              type: ApplicationCommandOptionType.String,
+              required: false
+            },
+            {
+              name: 'prompt',
+              description: 'Additional instructions for the answer',
+              type: ApplicationCommandOptionType.String,
               required: false
             }
           ]
@@ -244,6 +282,63 @@ ${table}`
     }
   }
 
+  if (chat.commandName === 'query') {
+    const attachment = chat.options.getAttachment('audio', false)
+    const url = chat.options.getString('url', false)
+    const question = chat.options.getString('question', true)
+
+    if (!attachment && !url) {
+      return chat.reply('Please provide an audio file attachment or a URL link to an audio/video file.')
+    }
+
+    await chat.deferReply()
+
+    const sourceUrl = attachment?.url ?? (url as string)
+    try {
+      const onProgress = async (message: string) => {
+        try {
+          await chat.editReply({ content: `🔄 ${message}` })
+        } catch (e) {
+          console.warn('askvideo onProgress editReply failed', e)
+        }
+      }
+
+      const sourceId = await audioToTranscript(ASKVIDEO_CONSTANTS.UNIVERSE, sourceUrl, onProgress)
+      const transcript = await loadTranscriptText(ASKVIDEO_CONSTANTS.UNIVERSE, sourceId)
+
+      const threadKey = chat.channel?.isThread?.() ? chat.channelId : undefined
+      const priorContext = await getAskVideoContext(threadKey)
+
+      const answer = await answerTranscriptQuestion({
+        transcript,
+        question,
+        sessionId: priorContext?.sessionId,
+        sessionDir: priorContext?.sessionDir,
+        model: ASKVIDEO_CONSTANTS.MODEL,
+        sourceId
+      })
+
+      const reply = await chat.editReply({
+        content: `**Question**\n${question}\n**About** ${sourceUrl}\n\n**Answer**\n${answer.answer}`
+      })
+
+      const cacheKey = threadKey ?? (reply as any).id
+      await rememberAskVideoContext(cacheKey, {
+        sessionId: answer.sessionId,
+        sessionDir: answer.sessionDir,
+        transcript,
+        sourceId
+      })
+
+      return
+    } catch (err: any) {
+      console.error('askvideo handler error', err)
+      return chat.editReply({
+        content: `Error answering video/audio question: ${err?.message ?? String(err)}`
+      })
+    }
+  }
+
   if (chat.commandName === 'record') {
     const sub = chat.options.getSubcommand(true)
     const guild = chat.guild
@@ -342,6 +437,61 @@ ${table}`
         return
       }
     }
+  }
+})
+
+client.on('messageCreate', async (message) => {
+  if (message.author.bot) return
+
+  const contextKey = message.channel?.isThread?.() ? message.channelId : message.reference?.messageId
+  const context = await getAskVideoContext(contextKey)
+  if (!context) return
+
+  const question = message.content?.trim()
+  if (!question) return
+
+  try {
+    await message.channel.sendTyping()
+  } catch (e) {
+    console.warn('Failed to send typing indicator', e)
+  }
+
+  try {
+    const answer = await answerTranscriptQuestion({
+      transcript: context.transcript,
+      question,
+      sessionId: context.sessionId,
+      sessionDir: context.sessionDir,
+      model: ASKVIDEO_CONSTANTS.MODEL,
+      sourceId: context.sourceId
+    })
+
+    await message.reply({ content: `**Question**\n${question}\n\n**Answer**\n${answer.answer}` })
+
+    const targetKey = message.channel?.isThread?.() ? message.channelId : contextKey
+    await rememberAskVideoContext(targetKey as string, {
+      sessionId: answer.sessionId,
+      sessionDir: answer.sessionDir,
+      transcript: context.transcript,
+      sourceId: context.sourceId
+    })
+  } catch (err: any) {
+    console.error('askvideo follow-up error', err)
+    try {
+      await message.reply({
+        content: `Error processing follow-up: ${err?.message ?? String(err)}`
+      })
+    } catch {}
+  }
+})
+
+client.on('threadCreate', async (thread) => {
+  try {
+    const starter = await thread.fetchStarterMessage()
+    if (!starter) return
+    await cloneAskVideoContext((starter as any).id, thread.id)
+  } catch (e) {
+    console.warn('threadCreate handler failed', e)
   }
 })
 
