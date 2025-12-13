@@ -478,18 +478,6 @@ export async function transcriptToDiagrams(
   onProgress?: (message: string) => void | Promise<void>,
   force = false
 ) {
-  let inputTranscript = transcript as string | undefined
-  let inputUserPrompt = userPrompt as string | undefined
-  let inputOnProgress = onProgress as ((m: string) => void | Promise<void>) | undefined
-  let inputForce = force
-  if (typeof transcript === 'string' && typeof userPrompt === 'function') {
-    // old ordering detected: shift values
-    inputUserPrompt = transcript
-    inputOnProgress = userPrompt as any
-    inputForce = onProgress as any
-    inputTranscript = undefined
-  }
-
   // Ensure we have a universe/id for artifact output; if caller only passed
   // a transcript string, create a temp universe/id under the OS temp dir.
   const outUniverse = universe || 'transcript'
@@ -502,9 +490,9 @@ export async function transcriptToDiagrams(
   let nodes: Array<{ label: string; type: string }> = []
   let relationships: Relationship[] = []
   let loadedFromGraph = false
-  if ((await fileExists(graphJSONPath)) && !inputForce) {
+  if ((await fileExists(graphJSONPath)) && !force) {
     try {
-      await notify(outUniverse, outId, 'Loading existing graph data…', inputOnProgress)
+      await notify(outUniverse, outId, 'Loading existing graph data…', onProgress)
       const parsed = await loadGraphJSON(sourceDir)
       nodes = parsed.nodes
       relationships = parsed.relationships
@@ -514,7 +502,7 @@ export async function transcriptToDiagrams(
       debug('Failed to load graph JSON, regenerating nodes/relationships', e)
     }
   }
-  const progress = (msg: string) => notify(outUniverse, outId, msg, inputOnProgress)
+  const progress = (msg: string) => notify(outUniverse, outId, msg, onProgress)
   if (!loadedFromGraph) {
     const transcripts: string[] = []
     // If a transcript string was provided, use it directly instead of reading
@@ -566,8 +554,8 @@ export async function transcriptToDiagrams(
     // let generatedFromSDB = false
     // if (useSDB) {
     //   try {
-    await notify(outUniverse, outId, 'Extracting causal relationships (System Dynamics Bot)…', inputOnProgress)
-    const cld = await generateCausalRelationships(transcripts, inputUserPrompt, progress)
+    await notify(outUniverse, outId, 'Extracting causal relationships (System Dynamics Bot)…', onProgress)
+    const cld = await generateCausalRelationships(transcripts, userPrompt, progress)
     if ('error' in cld) {
       console.error('CLD generation failed:', cld.error)
       throw new Error('Failed to extract any nodes or relationships')
@@ -608,9 +596,9 @@ export async function transcriptToDiagrams(
   // Export graph JSON if missing or empty
   try {
     const needGraph = !(await fileExists(graphJSONPath))
-    if (needGraph || inputForce) {
+    if (needGraph || force) {
       info('Writing graph JSON for', outId)
-      await notify(outUniverse, outId, 'Writing graph data…', inputOnProgress)
+      await notify(outUniverse, outId, 'Writing graph data…', onProgress)
       // read metadata if it exists
       let metadata = {
         name: outId,
@@ -644,9 +632,9 @@ export async function transcriptToDiagrams(
     const needMDD = !(await fileExists(mermaidMDD))
     const needSVG = !(await fileExists(mermaidSVG))
     const needPNG = !(await fileExists(mermaidPNG))
-    if (needMDD || needSVG || needPNG || inputForce) {
+    if (needMDD || needSVG || needPNG || force) {
       info('Writing mermaid artifacts for', outId)
-      await notify(outUniverse, outId, 'Rendering diagram (Mermaid)…', inputOnProgress)
+      await notify(outUniverse, outId, 'Rendering diagram (Mermaid)…', onProgress)
       await exportMermaid(sourceDir, 'mermaid', nodes, relationships)
     } else {
       debug('Mermaid artifacts already exist for', outId)
@@ -655,7 +643,7 @@ export async function transcriptToDiagrams(
     console.warn('Failed to export mermaid for', id, e?.message ?? e)
   }
 
-  await notify(outUniverse, outId, 'Finalizing…', inputOnProgress)
+  await notify(outUniverse, outId, 'Finalizing…', onProgress)
 
   // Remove processing marker
   try {
