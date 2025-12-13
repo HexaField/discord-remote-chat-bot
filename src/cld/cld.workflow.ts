@@ -17,7 +17,6 @@ export const cldWorkflowDocument = {
   sessions: {
     roles: [
       { role: 'summariser' as const, nameTemplate: '{{runId}}-cld-summariser' },
-      { role: 'sectioner' as const, nameTemplate: '{{runId}}-cld-sectioner' },
       { role: 'extractor' as const, nameTemplate: '{{runId}}-cld-extractor' },
       { role: 'classifier' as const, nameTemplate: '{{runId}}-cld-classifier' },
       { role: 'relator' as const, nameTemplate: '{{runId}}-cld-relator' },
@@ -73,19 +72,12 @@ export const cldWorkflowDocument = {
 Return strict JSON: {"topics": ["..."]} with lowercase entries and no commentary.`,
       parser: 'passthrough'
     },
-    sectioner: {
-      systemPrompt: `Break the provided text into coherent sections by theme or paragraph.
-- Preserve the original order and keep each section tight to the text.
-- Titles should be minimal (2-5 words), descriptive, lowercase.
-- Do not rewrite or summarize the section body; keep source wording.
-Return strict JSON: {"sections": [{"title": "...", "text": "..."}]} with minimal titles and original text spans. No commentary.`,
-      parser: 'passthrough'
-    },
     extractor: {
-      systemPrompt: `From each section, extract a rich set of causal statements the text actually asserts.
+      systemPrompt: `From the text, extract a rich set of causal statements the text actually asserts.
+Use the provided topics as a relevance filter; skip statements that do not clearly relate to those topics.
 - A causal statement should indicate how one factor influences another.
 - Exclude speculation, jokes, hypotheticals, opinions about unknowns, or non-causal descriptions.
-- Keep statements concise and anchored to the exact meaning in the section.
+- Keep statements concise and anchored to the exact meaning in the text span.
 Return strict JSON: {"causalStatements": [{"section": "title", "statement": "..."}]} preserving order.`,
       parser: 'passthrough'
     },
@@ -106,16 +98,18 @@ Return strict JSON: {"nodes": [{"label": "...", "type": "driver|obstacle|actor|o
 - reasoning: brief rationale grounded in the statement.
 - relevant: exact supporting span(s) from the text.
 - subject/object must match the chosen variable labels (lowercase) from earlier steps.
+Only include relationships that align with the provided topics.
 Return strict JSON: {"relationships": [{"subject": "...", "predicate": "positive|negative", "object": "...", "reasoning": "...", "relevant": ["..."]}]}. Subject/object lowercase variable names only.`,
       parser: 'passthrough'
     },
     consolidator: {
       systemPrompt: `You are a System Dynamics Professional Modeler.
-Users will give text, and upstream steps have produced topics, sections, causal statements, node types, and relationships. Consolidate into a causal loop diagram dataset where all variables form a single connected graph.
+    Users will give text, and upstream steps have produced topics, causal statements, node types, and relationships. Consolidate into a causal loop diagram dataset where all variables form a single connected graph.
 
 Tasks:
 - Merge variables across prior steps, keeping concise (max 2 words), neutral, lowercase labels; minimize distinct variables.
 - Ensure every relationship subject/object maps to a node label; drop unsupported items.
+- Exclude any nodes that have no relationships.
 - If no causal relationships exist, return empty arrays.
 
 Output strict JSON with shape: {"nodes":[{label,type}], "relationships":[{subject,predicate,object,reasoning,relevant,createdAt}]}
@@ -137,25 +131,17 @@ No markdown fences or commentary.`,
         {
           key: 'summariser',
           role: 'summariser' as const,
-          next: 'sectioner',
-          prompt: ['Source text (treat as transcript):\n{{user.instructions}}']
-        },
-        {
-          key: 'sectioner',
-          role: 'sectioner' as const,
           next: 'extractor',
-          prompt: [
-            'General topics (JSON) from prior step:\n{{steps.summariser.raw}}',
-            'Source text:\n{{user.instructions}}'
-          ]
+          prompt: ['Source text (treat as transcript):\n{{user.instructions}}']
         },
         {
           key: 'extractor',
           role: 'extractor' as const,
           next: 'classifier',
           prompt: [
-            'Sectioned text (JSON):\n{{steps.sectioner.raw}}',
-            'Extract asserted causal statements only; exclude speculation, jokes, or hypotheticals.'
+            'General topics (JSON):\n{{steps.summariser.raw}}',
+            'Source text:\n{{user.instructions}}',
+            'Extract asserted causal statements only; exclude speculation, jokes, or hypotheticals. Keep only statements tied to the provided topics.'
           ]
         },
         {
@@ -174,6 +160,7 @@ No markdown fences or commentary.`,
           prompt: [
             'Causal statements (JSON):\n{{steps.extractor.raw}}',
             'Node types (JSON):\n{{steps.classifier.raw}}',
+            'Topics (JSON):\n{{steps.summariser.raw}}',
             'Generate directional relationships with predicate positive/negative and supporting spans.'
           ]
         },
@@ -183,7 +170,6 @@ No markdown fences or commentary.`,
           prompt: [
             'Source text:\n{{user.instructions}}',
             'Topics (JSON):\n{{steps.summariser.raw}}',
-            'Sections (JSON):\n{{steps.sectioner.raw}}',
             'Causal statements (JSON):\n{{steps.extractor.raw}}',
             'Node types (JSON):\n{{steps.classifier.raw}}',
             'Relationships (JSON):\n{{steps.relator.raw}}',
@@ -229,9 +215,6 @@ export async function generateCausalRelationships(
     switch (msg.step) {
       case 'summariser':
         onProgress(`[CLD] Summarising topics...`)
-        break
-      case 'sectioner':
-        onProgress(`[CLD] Sectioning text...`)
         break
       case 'extractor':
         onProgress(`[CLD] Extracting causal statements...`)
