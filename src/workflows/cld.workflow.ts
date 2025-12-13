@@ -63,6 +63,7 @@ export const cldWorkflowDocument = {
       additionalProperties: false
     }
   },
+  user: { instructions: { type: 'string', default: '' } },
   roles: {
     summariser: {
       systemPrompt: `Summarise the general topic(s) of the provided text in 2-4 short sentences.
@@ -239,7 +240,7 @@ export async function generateCausalRelationships(
 
   try {
     const response = await runAgentWorkflow(cldWorkflowDefinition, {
-      userInstructions,
+      user: { instructions: userInstructions },
       model: 'github-copilot/gpt-5-mini',
       sessionDir: workspacePath,
       workflowId: cldWorkflowDefinition.id,

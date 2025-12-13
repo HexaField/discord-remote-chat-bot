@@ -10,8 +10,8 @@ import {
   transcribeAudioFile,
   transcriptToDiagrams
 } from './audioToDiagram'
-import { generateCausalRelationships } from './cld/cld.workflow'
 import { buildMermaid, exportMermaid } from './exporters/mermaidExporter'
+import { generateCausalRelationships } from './workflows/cld.workflow'
 // audioToDiagram will handle YouTube download+split; whisper is used internally there
 
 async function cmdTranscribe(input: string, output: string) {
@@ -21,8 +21,8 @@ async function cmdTranscribe(input: string, output: string) {
 
   // If input is a YouTube URL, run the full audio->diagram pipeline which will download, transcribe and split
   if (input.includes('youtube.com') || input.includes('youtu.be')) {
-    const id = await audioToTranscript('cli', input, (m) => console.log(m))
-    const res = await transcriptToDiagrams('cli', id, undefined, (m) => console.log(m))
+    const id = await audioToTranscript('cli', input)
+    const res = await transcriptToDiagrams('cli', id)
     const files = await fsp.readdir(res.dir)
     const txts = files.filter((f) => f.endsWith('.txt'))
     console.log('Transcripts written:')

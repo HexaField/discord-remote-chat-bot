@@ -137,6 +137,7 @@ Use empty arrays when a category is missing. No markdown or commentary.`,
   state: {
     initial: {}
   },
+  user: { instructions: { type: 'string', default: '' } },
   flow: {
     round: {
       start: 'insight',
@@ -248,7 +249,7 @@ export async function generateMeetingDigest(
   }
 
   const response = await runAgentWorkflow(meetingDigestWorkflowDefinition, {
-    userInstructions,
+    user: { instructions: userInstructions },
     model,
     sessionDir: workspacePath,
     workflowId: meetingDigestWorkflowDefinition.id,

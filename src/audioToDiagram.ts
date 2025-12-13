@@ -3,12 +3,12 @@ import { rmSync } from 'node:fs'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { generateCausalRelationships } from './cld/cld.workflow'
 import exportMermaid from './exporters/mermaidExporter'
 import { exportGraphJSON, loadGraphJSON } from './exporters/rdfExporter'
 import { ensureFfmpegAvailable } from './interfaces/ffmpeg'
 import { debug, info } from './interfaces/logger'
 import { ensureWhisperAvailable, transcribeWithWhisper } from './interfaces/whisper'
+import { generateCausalRelationships } from './workflows/cld.workflow'
 
 async function fileExists(p: string) {
   try {

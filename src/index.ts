@@ -21,10 +21,10 @@ import {
   rememberAskQuestionContext
 } from './askQuestion'
 import { audioToTranscript, transcriptToDiagrams } from './audioToDiagram'
-import { generateMeetingDigest } from './guildflow/meetingDigest.workflow'
 import { getActiveRecording, startRecording, stopRecording } from './recording/discord'
 import { startTranscriptionServer } from './recording/server'
-import { chooseToolForMention } from './tools'
+import { generateMeetingDigest } from './workflows/meetingDigest.workflow'
+import { chooseToolForMention } from './workflows/tools'
 
 const DISCORD_TOKEN: string | undefined = process.env.DISCORD_TOKEN
 const LLM_URL: string | undefined = process.env.LLM_URL
