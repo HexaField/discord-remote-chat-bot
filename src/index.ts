@@ -388,7 +388,10 @@ client.on('interactionCreate', async (interaction: Interaction) => {
           name: `meeting-digest-${resolved.recordingId}.txt`
         })
 
-        return chat.editReply({ files: [attachment] })
+        return chat.editReply({
+          content: `Here is your meeting digest:`,
+          files: [attachment]
+        })
       } catch (e: any) {
         return chat.editReply({ content: `Failed to generate meeting digest: ${e?.message ?? e}` })
       }
