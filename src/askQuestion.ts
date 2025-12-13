@@ -1,4 +1,4 @@
-import { createSession, extractResponseText, getSession, promptSession } from '@hexafield/agent-workflow/opencode'
+import { createSession, extractResponseText, getSession, promptSession } from '@hexafield/agent-workflow'
 import appRootPath from 'app-root-path'
 import fsp from 'node:fs/promises'
 import path from 'node:path'

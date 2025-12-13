@@ -1,10 +1,11 @@
-import { AgentStreamEvent, configureWorkflowParsers } from '@hexafield/agent-workflow/agent'
-import { runAgentWorkflow, type AgentWorkflowResult } from '@hexafield/agent-workflow/agent-orchestrator'
-import type { AgentWorkflowDefinition, WorkflowParserJsonOutput } from '@hexafield/agent-workflow/workflow-schema'
 import {
-  collectParserSchemasFromDefinitions,
-  hydrateWorkflowDefinition
-} from '@hexafield/agent-workflow/workflows/index'
+  AgentStreamEvent,
+  AgentWorkflowDefinition,
+  hydrateWorkflowDefinition,
+  runAgentWorkflow,
+  WorkflowParserJsonOutput,
+  type AgentWorkflowResult
+} from '@hexafield/agent-workflow'
 
 import os from 'node:os'
 
@@ -206,16 +207,11 @@ No markdown fences or commentary.`,
   }
 } as const satisfies AgentWorkflowDefinition
 
-export const registeredWorkflowParserSchemas = configureWorkflowParsers(
-  collectParserSchemasFromDefinitions(cldWorkflowDocument)
-)
-
-export type RegisteredWorkflowParserSchemas = typeof registeredWorkflowParserSchemas
 export type CldWorkflowDefinition = typeof cldWorkflowDocument
 export type CldParserOutput = WorkflowParserJsonOutput<(typeof cldWorkflowDocument)['parsers']['cld']>
 
 export const cldWorkflowDefinition = hydrateWorkflowDefinition(cldWorkflowDocument)
-export type CldWorkflowResult = AgentWorkflowResult<CldWorkflowDefinition, RegisteredWorkflowParserSchemas>
+export type CldWorkflowResult = AgentWorkflowResult<CldWorkflowDefinition>
 
 const extractCldOutput = (result: CldWorkflowResult): CldParserOutput | undefined => {
   const lastRound = result.rounds[result.rounds.length - 1]
@@ -224,15 +220,12 @@ const extractCldOutput = (result: CldWorkflowResult): CldParserOutput | undefine
 
 export async function generateCausalRelationships(
   sentences: string[],
-  userPrompt: string | undefined,
-  onProgress: (msg: string) => void,
-  verbose = false,
-  embeddingModel = 'bge-m3:latest',
-  sessionId?: string,
-  sessionDir?: string
-): Promise<CldParserOutput> {
+  userPrompt?: string,
+  onProgress?: (msg: string) => void
+): Promise<CldParserOutput | { error: string }> {
   const workspacePath = os.tmpdir() + `/cld-sessions`
   const onStream = (msg: AgentStreamEvent) => {
+    if (!onProgress) return
     switch (msg.step) {
       case 'summariser':
         onProgress(`[CLD] Summarising topics...`)
@@ -261,9 +254,8 @@ export async function generateCausalRelationships(
     userInstructions = `User prompt: ${userPrompt}\n\nSource text:\n${userInstructions}`
   }
 
-  const response = await runAgentWorkflow<CldWorkflowDefinition, RegisteredWorkflowParserSchemas>(
-    cldWorkflowDefinition,
-    {
+  try {
+    const response = await runAgentWorkflow(cldWorkflowDefinition, {
       userInstructions,
       model: 'github-copilot/gpt-5-mini',
       sessionDir: workspacePath,
@@ -271,24 +263,12 @@ export async function generateCausalRelationships(
       workflowSource: 'user',
       workflowLabel: cldWorkflowDefinition.description,
       onStream
-    }
-  )
-  const result = await response.result
-  const output = extractCldOutput(result)
-  console.log(result)
-  console.log(output)
+    })
+    const result = await response.result
+    const output = extractCldOutput(result)
 
-  return output!
+    return output!
+  } catch (e) {
+    return { error: (e as Error).message }
+  }
 }
-
-export type RelationshipEntry = {
-  subject: string
-  object: string
-  predicate: string
-  reasoning: string
-  relevant: string[]
-  createdAt: string
-}
-
-export type NodeType = 'driver' | 'obstacle' | 'actor' | 'other'
-export type Node = { label: string; type: NodeType }

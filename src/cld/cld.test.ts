@@ -33,8 +33,12 @@ test('generateCausalRelationships', async () => {
 
   // Run the full CLD extraction 5 times in a row and require validity each time
   for (let i = 0; i < 5; i++) {
-    const result = await generateCausalRelationships([largePrompt], undefined, async (msg: string) => {}, true)
+    const result = await generateCausalRelationships([largePrompt])
     console.log(result)
+
+    if ('error' in result) {
+      throw new Error(`CLD generation failed: ${result.error}`)
+    }
 
     // Expect a non-empty response and structured nodes/relationships
     expect(result).toBeDefined()

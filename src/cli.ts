@@ -5,13 +5,12 @@ import os from 'node:os'
 import path from 'node:path'
 import {
   audioToTranscript,
-  generateNodes,
-  generateRelationships,
   Relationship,
   toKumuJSON,
   transcribeAudioFile,
   transcriptToDiagrams
 } from './audioToDiagram'
+import { generateCausalRelationships } from './cld/cld.workflow'
 import { buildMermaid, exportMermaid } from './exporters/mermaidExporter'
 // audioToDiagram will handle YouTube download+split; whisper is used internally there
 
@@ -47,9 +46,18 @@ async function cmdDiagram(input: string, output: string) {
   if (!input || !output) throw new Error('Usage: diagram <input.txt> <output.json>')
   if (!fs.existsSync(input)) throw new Error(`Input not found: ${input}`)
   const transcript = await fsp.readFile(input, 'utf8')
+  const response = await generateCausalRelationships(
+    transcript.split('\n').filter((line) => line.trim()),
+    'userPrompt',
+    () => {}
+  )
 
-  const nodes = await generateNodes(transcript)
-  const relationships = await generateRelationships(transcript, nodes)
+  if ('error' in response) {
+    throw new Error(`Failed to generate causal relationships: ${response.error}`)
+  }
+
+  const nodes = response.nodes
+  const relationships = response.relationships
 
   await fsp.writeFile(output, JSON.stringify({ nodes, relationships }, null, 2), 'utf8')
   console.log('Diagram JSON written to', output)

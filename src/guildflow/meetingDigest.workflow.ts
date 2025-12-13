@@ -1,10 +1,11 @@
-import { AgentStreamEvent, configureWorkflowParsers } from '@hexafield/agent-workflow/agent'
-import { runAgentWorkflow, type AgentWorkflowResult } from '@hexafield/agent-workflow/agent-orchestrator'
-import type { AgentWorkflowDefinition, WorkflowParserJsonOutput } from '@hexafield/agent-workflow/workflow-schema'
 import {
-  collectParserSchemasFromDefinitions,
-  hydrateWorkflowDefinition
-} from '@hexafield/agent-workflow/workflows/index'
+  AgentStreamEvent,
+  AgentWorkflowDefinition,
+  hydrateWorkflowDefinition,
+  runAgentWorkflow,
+  WorkflowParserJsonOutput,
+  type AgentWorkflowResult
+} from '@hexafield/agent-workflow'
 
 import os from 'node:os'
 
@@ -196,21 +197,13 @@ Use empty arrays when a category is missing. No markdown or commentary.`,
   }
 } as const satisfies AgentWorkflowDefinition
 
-export const registeredWorkflowParserSchemas = configureWorkflowParsers(
-  collectParserSchemasFromDefinitions(meetingDigestWorkflowDocument)
-)
-
-export type RegisteredWorkflowParserSchemas = typeof registeredWorkflowParserSchemas
 export type MeetingDigestWorkflowDefinition = typeof meetingDigestWorkflowDocument
 export type MeetingDigestParserOutput = WorkflowParserJsonOutput<
   (typeof meetingDigestWorkflowDocument)['parsers']['meetingDigest']
 >
 
 export const meetingDigestWorkflowDefinition = hydrateWorkflowDefinition(meetingDigestWorkflowDocument)
-export type MeetingDigestWorkflowResult = AgentWorkflowResult<
-  MeetingDigestWorkflowDefinition,
-  RegisteredWorkflowParserSchemas
->
+export type MeetingDigestWorkflowResult = AgentWorkflowResult<MeetingDigestWorkflowDefinition>
 
 const extractMeetingDigest = (result: MeetingDigestWorkflowResult): MeetingDigestParserOutput | undefined => {
   const lastRound = result.rounds[result.rounds.length - 1]
@@ -254,18 +247,15 @@ export async function generateMeetingDigest(
     userInstructions = `User prompt: ${userPrompt}\n\nSource text:\n${userInstructions}`
   }
 
-  const response = await runAgentWorkflow<MeetingDigestWorkflowDefinition, RegisteredWorkflowParserSchemas>(
-    meetingDigestWorkflowDefinition,
-    {
-      userInstructions,
-      model,
-      sessionDir: workspacePath,
-      workflowId: meetingDigestWorkflowDefinition.id,
-      workflowSource: 'user',
-      workflowLabel: meetingDigestWorkflowDefinition.description,
-      onStream
-    }
-  )
+  const response = await runAgentWorkflow(meetingDigestWorkflowDefinition, {
+    userInstructions,
+    model,
+    sessionDir: workspacePath,
+    workflowId: meetingDigestWorkflowDefinition.id,
+    workflowSource: 'user',
+    workflowLabel: meetingDigestWorkflowDefinition.description,
+    onStream
+  })
 
   const result = await response.result
   const output = extractMeetingDigest(result)

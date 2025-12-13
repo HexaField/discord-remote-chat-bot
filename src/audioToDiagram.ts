@@ -8,7 +8,6 @@ import { generateCausalRelationships } from './cld/cld.workflow'
 import exportMermaid from './exporters/mermaidExporter'
 import { exportGraphJSON, loadGraphJSON } from './exporters/rdfExporter'
 import { ensureFfmpegAvailable } from './interfaces/ffmpeg'
-import { callLLM } from './interfaces/llm'
 import { debug, info } from './interfaces/logger'
 import { ensureWhisperAvailable, transcribeWithWhisper } from './interfaces/whisper'
 
@@ -122,140 +121,6 @@ export async function transcribeAudioFile(inputPath: string, transcriptPath: str
   // }
 
   return transcript
-}
-
-// Chunking parameters (can be tuned via env)
-const CHUNK_MAX = Number(process.env.LLM_CHUNK_MAX || '3000')
-const CHUNK_MIN = Number(process.env.LLM_CHUNK_MIN || '200')
-
-function chunkByNewline(text: string, maxChars: number, minLast: number) {
-  const lines = text.split(/\r?\n/)
-  const chunks: string[] = []
-  let curLines: string[] = []
-  let curLen = 0
-  const overlapChars = Math.max(1, Math.floor(maxChars * 0.1))
-
-  for (const line of lines) {
-    const addLen = (curLines.length > 0 ? 1 : 0) + line.length
-    const candidateLen = curLen + addLen
-    if (candidateLen > maxChars) {
-      if (curLines.length > 0) {
-        const chunk = curLines.join('\n')
-        chunks.push(chunk)
-
-        // compute overlap as last lines whose cumulative length >= overlapChars
-        let acc = 0
-        let overlapStart = curLines.length
-        for (let j = curLines.length - 1; j >= 0; j--) {
-          acc += curLines[j].length + 1 // include newline
-          overlapStart = j
-          if (acc >= overlapChars) break
-        }
-        const overlapLines = curLines.slice(overlapStart)
-
-        // start new curLines with the overlap then add the current line
-        curLines = overlapLines.slice()
-        curLen = curLines.length > 0 ? curLines.join('\n').length : 0
-        if (curLines.length > 0) {
-          curLen += 1 + line.length
-          curLines.push(line)
-        } else {
-          curLines = [line]
-          curLen = line.length
-        }
-      } else {
-        // single line longer than maxChars: force split the line
-        chunks.push(line.slice(0, maxChars))
-        const leftover = line.slice(maxChars)
-        curLines = leftover ? [leftover] : []
-        curLen = leftover.length
-      }
-    } else {
-      if (curLines.length > 0) curLen += 1 + line.length
-      else curLen = line.length
-      curLines.push(line)
-    }
-  }
-
-  if (curLines.length > 0) chunks.push(curLines.join('\n'))
-
-  if (chunks.length > 1 && chunks[chunks.length - 1].length < minLast) {
-    const last = chunks.pop() as string
-    chunks[chunks.length - 1] = chunks[chunks.length - 1] + '\n' + last
-  }
-  return chunks
-}
-
-export async function generateNodes(transcript: string) {
-  const prompt = `You are an assistant that extracts a new-line separated list of concepts from a document. These must only be a concept, idea, person or place and never a whole sentence. Do not use underscores, hyphens, or any other punctuation in the concepts unless it is part of the name. Respond with a single new-line separated string.`
-
-  const chunks = chunkByNewline(transcript, CHUNK_MAX, CHUNK_MIN)
-  const nodeSet = new Set<string>()
-  for (let i = 0; i < chunks.length; i++) {
-    const chunk = chunks[i]
-    const resp = await callLLM(prompt, chunk, 'opencode', 'github-copilot/gpt-5-mini')
-    if (!resp.success) throw new Error(resp.error || 'LLM failed extracting nodes')
-    const raw = String(resp.data || '')
-    for (const n of extractNodes(raw)) nodeSet.add(n)
-  }
-  return Array.from(nodeSet)
-}
-
-export async function generateRelationships(transcript: string, nodes: string[]) {
-  // Request JSON array of relationship objects from the LLM.
-  const prompt = `You are an assistant that extracts relationships from a document given a list of nodes. Respond with a JSON array where each item is an object with keys { "subject": string, "predicate": string, "object": string }. Only include relationships supported by the provided document. Objects and subjects must be of the defined nodes, and predicates only a very simple relationship type, not whole sentences. The nodes are: ${nodes.join(', ')}.`
-
-  const chunks = chunkByNewline(transcript, CHUNK_MAX, CHUNK_MIN)
-  const relMap = new Map<string, Relationship>()
-  for (let i = 0; i < chunks.length; i++) {
-    const chunk = chunks[i]
-    const resp = await callLLM(prompt, chunk, 'opencode', 'github-copilot/gpt-5-mini')
-    if (!resp.success) throw new Error(resp.error || 'LLM failed extracting relationships')
-    const raw = String(resp.data || '')
-
-    // Try to pull a JSON array from the response
-    let parsed: any = null
-    try {
-      // try extract ```json ... ``` block
-      const jsonBlockMatch = raw.match(/```json([\s\S]*?)```/)
-      if (jsonBlockMatch) {
-        try {
-          parsed = JSON.parse(jsonBlockMatch[1].trim())
-        } catch (e) {
-          // still failed, will skip
-          console.debug('Failed to parse JSON from extracted block:', e)
-        }
-      }
-    } catch (e) {
-      try {
-        const first = raw.indexOf('[')
-        const last = raw.lastIndexOf(']')
-        if (first >= 0 && last > first) {
-          parsed = JSON.parse(raw.slice(first, last + 1))
-        } else {
-          parsed = JSON.parse(raw)
-        }
-      } catch (e) {
-        console.debug('Failed to parse JSON from raw response:', e)
-      }
-      // Could not parse JSON from this chunk, skip it
-      console.debug('Failed to parse JSON relationships from LLM response chunk ' + i)
-      continue
-    }
-
-    if (!Array.isArray(parsed)) continue
-    for (const item of parsed) {
-      if (!item || typeof item !== 'object') continue
-      const subject = String(item.subject || '').trim()
-      const predicate = String(item.predicate || '').trim()
-      const object = String(item.object || '').trim()
-      if (!subject || !predicate || !object) continue
-      const key = `${subject}|||${predicate}|||${object}`
-      relMap.set(key, { subject, predicate, object })
-    }
-  }
-
-  return Array.from(relMap.values())
 }
 
 export async function downloadYoutubeSingleWithInfo(youtubeURL: string, sourceDir: string, audioFormat = 'mp3') {
@@ -657,15 +522,9 @@ export async function transcriptToDiagrams(
     // if (useSDB) {
     //   try {
     await notify(universe, id, 'Extracting causal relationships (System Dynamics Bot)…', onProgress)
-    const cld = await generateCausalRelationships(
-      transcripts,
-      userPrompt,
-      progress,
-      true,
-      undefined, // allow generateCausalRelationships to auto-generate sessionId
-      sourceDir // sessionDir for per-source persistence
-    )
-    if (cld.nodes.length === 0 || cld.relationships.length === 0) {
+    const cld = await generateCausalRelationships(transcripts, userPrompt, progress)
+    if ('error' in cld) {
+      console.error('CLD generation failed:', cld.error)
       throw new Error('Failed to extract any nodes or relationships')
     }
     nodes = cld.nodes
