@@ -6,7 +6,6 @@ import path from 'node:path'
 export type AskQuestionContext = {
   sessionId: string
   sessionDir: string
-  transcript: string
   sourceId: string
 }
 
@@ -15,24 +14,7 @@ const DEFAULT_UNIVERSE = 'discord'
 const DEFAULT_SESSION_DIR = path.resolve(appRootPath.path, '.tmp', `${DEFAULT_UNIVERSE}-sessions`)
 const CONTEXT_DIR = path.join(DEFAULT_SESSION_DIR, 'context')
 
-const transcriptPathFor = (universe: string, id: string) =>
-  path.resolve(appRootPath.path, '.tmp', universe, id, 'audio.vtt')
-
 const contextPathFor = (key: string) => path.join(CONTEXT_DIR, `${key}.json`)
-
-export async function loadTranscriptText(universe: string, id: string): Promise<string> {
-  const vttPath = transcriptPathFor(universe, id)
-  const vttContent = await fsp.readFile(vttPath, 'utf8')
-  const cueRegex =
-    /(\d{2}:\d{2}:\d{2}\.\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}\.\d{3})\s*\n([\s\S]*?)(?=\n\s*\d{2}:\d{2}:\d{2}\.\d{3}\s*-->|$)/gm
-  const chunks: string[] = []
-  let match: RegExpExecArray | null
-  while ((match = cueRegex.exec(vttContent)) !== null) {
-    const cueText = match[3].replace(/\n+/g, ' ').trim()
-    if (cueText) chunks.push(cueText)
-  }
-  return chunks.join('\n')
-}
 
 async function ensureSession(sessionId?: string, sessionDir = DEFAULT_SESSION_DIR, name?: string) {
   await fsp.mkdir(sessionDir, { recursive: true })
@@ -60,7 +42,7 @@ async function writeContext(key: string, context: AskQuestionContext) {
 }
 
 export async function answerQuestion(options: {
-  transcript: string
+  context: string
   question: string
   sessionId?: string
   sessionDir?: string
@@ -71,8 +53,8 @@ export async function answerQuestion(options: {
   const sessionDir = options.sessionDir || DEFAULT_SESSION_DIR
   const session = await ensureSession(options.sessionId, sessionDir, options.sourceId)
   const prompts = [
-    'You answer questions using only the provided transcript. Respond concisely and avoid speculation.',
-    `Transcript:\n${options.transcript}`,
+    'You answer questions. Respond concisely and avoid speculation. Use only internal reasoning and web search in your answer.',
+    `Context:\n${options.context}`,
     `User question: ${options.question}`
   ]
   const response = await promptSession(session, prompts, model)
@@ -83,7 +65,6 @@ export async function answerQuestion(options: {
     sessionId: (session as any).id as string,
     sessionDir,
     parts: response.parts ?? [],
-    transcript: options.transcript,
     sourceId: options.sourceId || (session as any).title || 'text'
   }
 }

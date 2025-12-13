@@ -24,6 +24,7 @@ import { audioToTranscript, transcriptToDiagrams } from './audioToDiagram'
 import { generateMeetingDigest } from './guildflow/meetingDigest.workflow'
 import { getActiveRecording, startRecording, stopRecording } from './recording/discord'
 import { startTranscriptionServer } from './recording/server'
+import { chooseToolForMention } from './tools'
 
 const DISCORD_TOKEN: string | undefined = process.env.DISCORD_TOKEN
 const LLM_URL: string | undefined = process.env.LLM_URL
@@ -140,33 +141,38 @@ const formatMeetingDigest = (digest: any) => {
 }
 
 async function buildReferencedMessageContext(message: Message) {
-  if (!message.reference?.messageId) return ''
+  if (!message.reference?.messageId) return
 
   try {
     const referenced = await message.fetchReference()
-    const parts: string[] = []
-    if (referenced.content) parts.push(referenced.content)
 
-    const attachmentTexts: string[] = []
+    const attachmentTexts = {} as Record<string, string>
     for (const attachment of referenced.attachments.values()) {
       if (!isTextAttachment(attachment.name, attachment.contentType)) continue
       try {
         const res = await fetch(attachment.url)
         if (!res.ok) throw new Error(`Failed to fetch attachment (${res.status})`)
         const text = await res.text()
-        attachmentTexts.push(`Attachment ${attachment.name ?? 'file'}:\n${text}`)
+        attachmentTexts[attachment.name || attachment.url] = text
       } catch (e) {
         console.warn('Failed to download referenced attachment', e)
       }
     }
 
-    if (attachmentTexts.length) parts.push(attachmentTexts.join('\n\n'))
-    return parts.join('\n\n')
+    return {
+      content: referenced.content,
+      attachments: attachmentTexts
+    }
   } catch (e) {
     console.warn('Failed to fetch referenced message', e)
-    return ''
+    return
   }
 }
+
+const serializeAttachments = (attachments: Record<string, string>): string =>
+  Object.entries(attachments)
+    .map((name, content) => `\`\`\`${name}\n${content}\n\`\`\``)
+    .join('\n\n')
 
 if (!DISCORD_TOKEN) {
   console.error('Missing DISCORD_TOKEN in environment')
@@ -314,7 +320,14 @@ client.on('interactionCreate', async (interaction: Interaction) => {
       }
 
       const id = await audioToTranscript('discord', url, onProgress)
-      const { kumuPath, pngPath } = await transcriptToDiagrams('discord', id, userPrompt, onProgress, regenerate)
+      const { kumuPath, pngPath } = await transcriptToDiagrams(
+        'discord',
+        id,
+        undefined,
+        userPrompt,
+        onProgress,
+        regenerate
+      )
       const diagramData = await fs.readFile(kumuPath, 'utf-8')
       const pngData = await fs.readFile(pngPath)
       return chat.editReply({
@@ -489,7 +502,7 @@ client.on('interactionCreate', async (interaction: Interaction) => {
         const followUpTranscription = async () => {
           try {
             const followUp = await transcriptChannel.send({ content: 'Generating diagrams from the transcript…' })
-            const out = await transcriptToDiagrams('recordings', sess.recordingId, '', async (m) => {
+            const out = await transcriptToDiagrams('recordings', sess.recordingId, undefined, '', async (m) => {
               try {
                 await followUp.edit({ content: `🔄 ${m}` })
               } catch (e) {
@@ -534,27 +547,122 @@ client.on('messageCreate', async (message) => {
 
   if (!isMention && !existingContext) return
 
+  await message.channel.sendTyping()
+
+  const reply = await message.reply('Optimizing tool selection...')
+
   const raw = message.content || ''
   const cleaned = botId ? raw.replace(new RegExp(`<@!?${botId}>`, 'g'), '').trim() : raw.trim()
   const question = cleaned || raw.trim()
   if (!question) return
 
-  const referencedContext = await buildReferencedMessageContext(message)
-
   try {
-    await message.channel.sendTyping()
-  } catch (e) {
-    console.warn('Failed to send typing indicator', e)
-  }
+    const referencedContext = await buildReferencedMessageContext(message)
 
-  try {
-    const transcriptParts = [] as string[]
-    if (existingContext?.transcript) transcriptParts.push(existingContext.transcript)
-    if (referencedContext) transcriptParts.push(referencedContext)
-    if (!transcriptParts.length) transcriptParts.push(question)
-    const transcript = transcriptParts.join('\n\n')
+    const onProgress = async (m: string) => {
+      try {
+        await reply.edit(m)
+      } catch {}
+    }
+
+    const contextParts = [] as string[]
+    if (referencedContext?.content) contextParts.push(`Referenced Message:${referencedContext.content}`)
+    if (referencedContext?.attachments) {
+      contextParts.push(serializeAttachments(referencedContext.attachments))
+    }
+    if (!contextParts.length) contextParts.push(question)
+    const fullContext = contextParts.join('\n\n')
+    const chooser = await chooseToolForMention({
+      question,
+      referenced: referencedContext?.attachments,
+      model: ASKQUESTION_CONSTANTS.MODEL
+    })
+    const tool = chooser?.tool
+    if (tool && tool !== 'none') {
+      await reply.edit(`Using ${tool} tool...`)
+
+      if (tool === 'diagram') {
+        const attachment = message.attachments.first()
+        const url = attachment?.url ?? message.content.match(/https?:\/\/\S+/)?.[0]
+        if (!url && !referencedContext) {
+          await reply.edit('I could not find an audio attachment or URL to generate a diagram from.')
+          return
+        }
+        await reply.edit('Generating diagram from the provided audio…')
+        const id = referencedContext ? undefined : await audioToTranscript('discord', url!, onProgress)
+        const out = await transcriptToDiagrams('discord', id, fullContext, question, onProgress, false)
+        const diagramData = await fs.readFile(out.kumuPath, 'utf-8')
+        const pngData = await fs.readFile(out.pngPath)
+        await reply.edit({
+          content: 'Here is your diagram:',
+          files: [
+            new AttachmentBuilder(Buffer.from(diagramData), { name: 'kumu.json' }),
+            new AttachmentBuilder(pngData, { name: 'diagram.png' })
+          ]
+        })
+        return
+      }
+
+      if (tool === 'transcribe') {
+        const attachment = message.attachments.first()
+        const url = attachment?.url ?? message.content.match(/https?:\/\/\S+/)?.[0]
+        if (!url) {
+          await reply.edit('I could not find an audio attachment or URL to transcribe.')
+          return
+        }
+        await reply.edit('Transcribing audio…')
+        try {
+          const id = await audioToTranscript('discord', url, onProgress)
+          const vttPath = path.join(process.cwd(), '.tmp', 'discord', id, 'audio.vtt')
+          const vtt = await fs.readFile(vttPath, 'utf-8')
+          if (vtt.length < 1900) {
+            await reply.edit({ content: `Transcript:\n\n${vtt}` })
+          } else {
+            const att = new AttachmentBuilder(Buffer.from(vtt, 'utf-8'), { name: `transcript-${id}.txt` })
+            await reply.edit({ content: 'Transcript generated:', files: [att] })
+          }
+        } catch (e: any) {
+          await reply.edit({ content: `Failed to transcribe: ${e?.message ?? e}` })
+        }
+        return
+      }
+
+      if (tool === 'meeting_summarise') {
+        const transcriptLines = fullContext
+          .split(/\r?\n/)
+          .map((l) => l.trim())
+          .filter(Boolean)
+        if (!transcriptLines.length) {
+          await reply.edit('No transcript text available to summarise.')
+          return
+        }
+        await reply.edit('Generating meeting summary…')
+        try {
+          const digest = await generateMeetingDigest(transcriptLines, undefined, async (m) => {
+            try {
+              await message.channel.send(`🔄 ${m}`)
+            } catch {}
+          })
+          const formatted = formatMeetingDigest(digest)
+          if (formatted.length < 2000) {
+            await reply.edit({ content: formatted })
+          } else {
+            const att = new AttachmentBuilder(Buffer.from(formatted, 'utf-8'), {
+              name: `meeting-digest.txt`
+            })
+            await reply.edit({ content: 'Here is the meeting digest:', files: [att] })
+          }
+        } catch (e: any) {
+          await reply.edit({ content: `Failed to generate meeting digest: ${e?.message ?? e}` })
+        }
+        return
+      }
+    }
+
+    await reply.edit('Thinking...')
+
     const answer = await answerQuestion({
-      transcript,
+      context: fullContext,
       question,
       sessionId: existingContext?.sessionId,
       sessionDir: existingContext?.sessionDir,
@@ -562,22 +670,29 @@ client.on('messageCreate', async (message) => {
       sourceId: existingContext?.sourceId ?? 'text'
     })
 
-    await message.reply({ content: answer.answer })
-
-    const targetKey = message.channel?.isThread?.() ? message.channelId : contextKey || message.id
-    await rememberAskQuestionContext(targetKey as string, {
-      sessionId: answer.sessionId,
-      sessionDir: answer.sessionDir,
-      transcript,
-      sourceId: existingContext?.sourceId ?? 'text'
-    })
-  } catch (err: any) {
-    console.error('askquestion follow-up error', err)
-    try {
-      await message.reply({
-        content: `Error processing follow-up: ${err?.message ?? String(err)}`
+    if (answer.answer.length > 2000) {
+      const att = new AttachmentBuilder(Buffer.from(answer.answer, 'utf-8'), {
+        name: `answer-${answer.sessionId}.txt`
       })
-    } catch {}
+      await reply.edit({ content: '', files: [att] })
+    } else {
+      await reply.edit({ content: answer.answer })
+    }
+
+    const targetKey = message.channel?.isThread?.() && message.channelId
+    if (targetKey) {
+      await rememberAskQuestionContext(targetKey, {
+        sessionId: answer.sessionId,
+        sessionDir: answer.sessionDir,
+        sourceId: existingContext?.sourceId ?? 'text'
+      })
+    }
+  } catch (e) {
+    try {
+      await reply.edit(`Error processing your question: ${e instanceof Error ? e.message : String(e)}`)
+    } catch {
+      await message.channel.send(`Error processing your question: ${e instanceof Error ? e.message : String(e)}`)
+    }
   }
 })
 

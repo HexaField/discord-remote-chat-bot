@@ -1,4 +1,3 @@
-import appRootPath from 'app-root-path'
 import { execFile } from 'node:child_process'
 import { rmSync } from 'node:fs'
 import fsp from 'node:fs/promises'
@@ -162,7 +161,8 @@ function normalizeTranscript(text: string) {
 
 async function persistProgress(universe: string, id: string, msg: string) {
   try {
-    const sourceDir = path.resolve(appRootPath.path, '.tmp', universe, id)
+    const sourceDir = path.join(os.tmpdir(), 'discord-remote-chat-bot', universe, id)
+    await fsp.mkdir(sourceDir, { recursive: true })
     const out = { status: msg, updated: Date.now() }
     await fsp.writeFile(path.join(sourceDir, 'progress.json'), JSON.stringify(out, null, 2), 'utf8')
   } catch (e) {
@@ -189,7 +189,7 @@ export async function audioToTranscript(
   audioURL: string,
   onProgress?: (message: string) => void | Promise<void>
 ) {
-  const folder = path.resolve(appRootPath.path, '.tmp', universe)
+  const folder = path.join(os.tmpdir(), 'discord-remote-chat-bot', universe)
 
   await fsp.mkdir(folder, { recursive: true })
 
@@ -204,32 +204,31 @@ export async function audioToTranscript(
 
   const originalName = path.basename(urlPath) || `audio-${Date.now()}`
   let baseName = path.basename(originalName, path.extname(originalName))
-
-  // If the input is a local file URL and lives inside an existing folder (for
-  // example the import handler saved the file to DATA_ROOT/<universe>/<id>),
-  // prefer to use that containing directory as the sourceDir so generated
-  // artifacts (graph.json, audio.vtt, kumu.json) are colocated with the
-  // uploaded file. Otherwise fall back to the normal TMP_DIR/<baseName>.
+  // Always use a temp folder under the OS temp dir for generated artifacts.
+  // If the source is a local `file://` URL, copy the file into the temp
+  // directory so we don't read/write inside the repo or other user folders.
   let sourceDir = path.join(folder, baseName)
+  await fsp.mkdir(sourceDir, { recursive: true })
+  const transcriptPath = path.join(sourceDir, `audio.vtt`)
+
   try {
     if (audioURL.startsWith('file://')) {
       const fp = decodeURIComponent(new URL(audioURL).pathname)
       try {
         const stat = await fsp.stat(fp)
         if (stat.isFile()) {
-          sourceDir = path.dirname(fp)
-          baseName = path.basename(sourceDir)
-        } else {
-          // not a file, use default
+          const audioFormat = 'mp3'
+          const audioPath = path.join(sourceDir, `audio.${audioFormat}`)
+          await fsp.copyFile(fp, audioPath)
         }
       } catch (e) {
-        // if file doesn't exist yet or cannot stat, ignore and use default
+        // fallthrough: if we can't read/copy the local file, downstream
+        // download/copy logic will try to fetch the URL normally and fail.
       }
     }
   } catch (e) {
     // ignore malformed URL
   }
-  const transcriptPath = path.join(sourceDir, `audio.vtt`)
 
   // if transcript already exists, skip processing
   if (await fileExists(transcriptPath)) {
@@ -472,24 +471,40 @@ export async function audioToTranscript(
 }
 
 export async function transcriptToDiagrams(
-  universe: string,
-  id: string,
+  universe?: string | undefined,
+  id?: string | undefined,
+  transcript?: string | undefined,
   userPrompt?: string,
   onProgress?: (message: string) => void | Promise<void>,
   force = false
 ) {
-  // Generate nodes and relationships. If a graph JSON exists, load it and use that as the source of truth.
-  const folder = path.resolve(appRootPath.path, '.tmp', universe)
-  const sourceDir = path.join(folder, id)
+  let inputTranscript = transcript as string | undefined
+  let inputUserPrompt = userPrompt as string | undefined
+  let inputOnProgress = onProgress as ((m: string) => void | Promise<void>) | undefined
+  let inputForce = force
+  if (typeof transcript === 'string' && typeof userPrompt === 'function') {
+    // old ordering detected: shift values
+    inputUserPrompt = transcript
+    inputOnProgress = userPrompt as any
+    inputForce = onProgress as any
+    inputTranscript = undefined
+  }
+
+  // Ensure we have a universe/id for artifact output; if caller only passed
+  // a transcript string, create a temp universe/id under the OS temp dir.
+  const outUniverse = universe || 'transcript'
+  const outId = id || `t-${Date.now()}`
+  const folder = path.join(os.tmpdir(), 'discord-remote-chat-bot', outUniverse)
+  const sourceDir = path.join(folder, outId)
 
   const graphJSONPath = path.join(sourceDir, `graph.json`)
 
   let nodes: Array<{ label: string; type: string }> = []
   let relationships: Relationship[] = []
   let loadedFromGraph = false
-  if ((await fileExists(graphJSONPath)) && !force) {
+  if ((await fileExists(graphJSONPath)) && !inputForce) {
     try {
-      await notify(universe, id, 'Loading existing graph data…', onProgress)
+      await notify(outUniverse, outId, 'Loading existing graph data…', inputOnProgress)
       const parsed = await loadGraphJSON(sourceDir)
       nodes = parsed.nodes
       relationships = parsed.relationships
@@ -499,30 +514,60 @@ export async function transcriptToDiagrams(
       debug('Failed to load graph JSON, regenerating nodes/relationships', e)
     }
   }
-  const progress = (msg: string) => notify(universe, id, msg, onProgress)
+  const progress = (msg: string) => notify(outUniverse, outId, msg, inputOnProgress)
   if (!loadedFromGraph) {
     const transcripts: string[] = []
-    // read all transcript chunks from VTT
-    const vttPath = path.join(sourceDir, `audio.vtt`)
-    if (!(await fileExists(vttPath))) {
-      throw new Error('Transcript VTT file not found: ' + vttPath)
-    }
-    const vttContent = await fsp.readFile(vttPath, 'utf8')
-    // Regex to capture VTT cues: start --> end then the cue text (non-greedy)
+    // If a transcript string was provided, use it directly instead of reading
+    // an `audio.vtt` from disk. Otherwise, read the VTT from `sourceDir`.
     const cueRegex =
       /(\d{2}:\d{2}:\d{2}\.\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}\.\d{3})\s*\n([\s\S]*?)(?=\n\s*\d{2}:\d{2}:\d{2}\.\d{3}\s*-->|$)/gm
-    let cueMatch: RegExpExecArray | null
-    while ((cueMatch = cueRegex.exec(vttContent)) !== null) {
-      const cueText = cueMatch[3].replace(/\n+/g, ' ').trim()
-      if (cueText.length > 0) transcripts.push(cueText)
+
+    if (transcript && transcript.trim().length > 0) {
+      const txt = transcript.trim()
+      if (txt.startsWith('WEBVTT')) {
+        let cueMatch: RegExpExecArray | null
+        while ((cueMatch = cueRegex.exec(txt)) !== null) {
+          const cueText = cueMatch[3].replace(/\n+/g, ' ').trim()
+          if (cueText.length > 0) transcripts.push(cueText)
+        }
+      } else {
+        // Split transcript into chunks by double-newline paragraphs. If that
+        // yields one chunk only, keep the whole transcript as a single chunk.
+        const parts = txt
+          .split(/\n{2,}/)
+          .map((s) => normalizeTranscript(s))
+          .filter(Boolean)
+        if (parts.length > 1) {
+          transcripts.push(...parts)
+        } else {
+          transcripts.push(normalizeTranscript(txt))
+        }
+      }
+      console.log(`Using provided transcript (chunks=${transcripts.length}) for causal relationship extraction`)
+      // Ensure output directory exists so artifacts can be written below
+      await fsp.mkdir(sourceDir, { recursive: true })
+    } else {
+      // read all transcript chunks from VTT on disk
+      const vttPath = path.join(sourceDir, `audio.vtt`)
+      if (!(await fileExists(vttPath))) {
+        throw new Error('Transcript VTT file not found: ' + vttPath)
+      }
+      const vttContent = await fsp.readFile(vttPath, 'utf8')
+      let cueMatch: RegExpExecArray | null
+      while ((cueMatch = cueRegex.exec(vttContent)) !== null) {
+        const cueText = cueMatch[3].replace(/\n+/g, ' ').trim()
+        if (cueText.length > 0) transcripts.push(cueText)
+      }
+      console.log(
+        `Using ${transcripts.length} transcript chunk(s) from ${sourceDir} for causal relationship extraction`
+      )
     }
-    console.log(`Using ${transcripts.length} transcript chunk(s) for causal relationship extraction`)
     // const useSDB = Boolean(process.env.USE_SYSTEM_DYNAMICS_BOT)
     // let generatedFromSDB = false
     // if (useSDB) {
     //   try {
-    await notify(universe, id, 'Extracting causal relationships (System Dynamics Bot)…', onProgress)
-    const cld = await generateCausalRelationships(transcripts, userPrompt, progress)
+    await notify(outUniverse, outId, 'Extracting causal relationships (System Dynamics Bot)…', inputOnProgress)
+    const cld = await generateCausalRelationships(transcripts, inputUserPrompt, progress)
     if ('error' in cld) {
       console.error('CLD generation failed:', cld.error)
       throw new Error('Failed to extract any nodes or relationships')
@@ -552,9 +597,6 @@ export async function transcriptToDiagrams(
   const mermaidMDD = path.join(sourceDir, `mermaid.mdd`)
   const mermaidSVG = path.join(sourceDir, `mermaid.svg`)
   const mermaidPNG = path.join(sourceDir, `mermaid.png`)
-  const graphvizDOT = path.join(sourceDir, `graphviz.dot`)
-  const graphvizSVG = path.join(sourceDir, `graphviz.svg`)
-  const graphvizPNG = path.join(sourceDir, `graphviz.png`)
 
   // Create processing marker (write timestamp)
   try {
@@ -566,13 +608,13 @@ export async function transcriptToDiagrams(
   // Export graph JSON if missing or empty
   try {
     const needGraph = !(await fileExists(graphJSONPath))
-    if (needGraph || force) {
-      info('Writing graph JSON for', id)
-      await notify(universe, id, 'Writing graph data…', onProgress)
+    if (needGraph || inputForce) {
+      info('Writing graph JSON for', outId)
+      await notify(outUniverse, outId, 'Writing graph data…', inputOnProgress)
       // read metadata if it exists
       let metadata = {
-        name: id,
-        source: id,
+        name: outId,
+        source: outId,
         created: Date.now()
       }
       try {
@@ -593,50 +635,41 @@ export async function transcriptToDiagrams(
     console.warn('Failed to export graph JSON for', id, e?.message ?? e)
   }
 
-  const graphType = process.env.DIAGRAM_EXPORTER || 'mermaid' // options: 'mermaid' or 'graphviz'
-  console.log(graphType)
-
-  if (graphType === 'mermaid') {
-    // Export Mermaid if missing
-    try {
-      //force rewrite of mermaid artifacts
-      rmSync(mermaidMDD, { force: true })
-      rmSync(mermaidSVG, { force: true })
-      rmSync(mermaidPNG, { force: true })
-      const needMDD = !(await fileExists(mermaidMDD))
-      const needSVG = !(await fileExists(mermaidSVG))
-      const needPNG = !(await fileExists(mermaidPNG))
-      if (needMDD || needSVG || needPNG || force) {
-        info('Writing mermaid artifacts for', id)
-        await notify(universe, id, 'Rendering diagram (Mermaid)…', onProgress)
-        await exportMermaid(sourceDir, 'mermaid', nodes, relationships)
-      } else {
-        debug('Mermaid artifacts already exist for', id)
-      }
-    } catch (e: any) {
-      console.warn('Failed to export mermaid for', id, e?.message ?? e)
+  // Export Mermaid if missing
+  try {
+    //force rewrite of mermaid artifacts
+    rmSync(mermaidMDD, { force: true })
+    rmSync(mermaidSVG, { force: true })
+    rmSync(mermaidPNG, { force: true })
+    const needMDD = !(await fileExists(mermaidMDD))
+    const needSVG = !(await fileExists(mermaidSVG))
+    const needPNG = !(await fileExists(mermaidPNG))
+    if (needMDD || needSVG || needPNG || inputForce) {
+      info('Writing mermaid artifacts for', outId)
+      await notify(outUniverse, outId, 'Rendering diagram (Mermaid)…', inputOnProgress)
+      await exportMermaid(sourceDir, 'mermaid', nodes, relationships)
+    } else {
+      debug('Mermaid artifacts already exist for', outId)
     }
+  } catch (e: any) {
+    console.warn('Failed to export mermaid for', id, e?.message ?? e)
   }
 
-  await notify(universe, id, 'Finalizing…', onProgress)
+  await notify(outUniverse, outId, 'Finalizing…', inputOnProgress)
 
   // Remove processing marker
   try {
     await fsp.unlink(processingMarker).catch(() => {})
   } catch (e) {
-    debug('Could not finalize markers for', id, e)
+    debug('Could not finalize markers for', outId, e)
   }
-
-  const activePNG = graphType === 'graphviz' ? graphvizPNG : mermaidPNG
-  const activeSVG = graphType === 'graphviz' ? graphvizSVG : mermaidSVG
 
   return {
     dir: sourceDir,
     graphJSONPath,
     kumuPath,
-    pngPath: activePNG,
-    svgPath: activeSVG,
-    mermaid: { mdd: mermaidMDD, svg: mermaidSVG, png: mermaidPNG },
-    graphviz: { dot: graphvizDOT, svg: graphvizSVG, png: graphvizPNG }
+    pngPath: mermaidPNG,
+    svgPath: mermaidSVG,
+    mermaid: { mdd: mermaidMDD, svg: mermaidSVG, png: mermaidPNG }
   }
 }
