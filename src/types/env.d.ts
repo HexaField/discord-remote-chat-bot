@@ -5,7 +5,5 @@ declare namespace NodeJS {
     LLM_API_KEY?: string
     RECORDING_TRANSCRIPT_CHANNEL_ID?: string
     CHANNEL_ID?: string
-    CSV_PATH?: string
-    MAX_CSV_ROWS?: string
   }
 }
