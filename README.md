@@ -4,15 +4,14 @@ GuildBot is a TypeScript toolkit that turns Discord conversations and audio into
 
 ## What It Does
 
-- Discord slash commands for CSV-grounded Q&A (`/reflect`), audio-to-diagram (`/diagram`), and voice-channel recording/transcription (`/record start|stop`).
-- Audio pipeline that downloads or receives audio, transcribes to VTT with Whisper, extracts causal relationships, and emits Mermaid/Graphviz/Kumu/graph JSON outputs.
+- Discord slash commands for audio-to-diagram (`/diagram`), and voice-channel recording/transcription (`/record start|stop`).
+- Audio pipeline that downloads or receives audio, transcribes to VTT with Whisper, extracts causal relationships, and emits Mermaid/Kumu/graph JSON outputs.
 - Optional web UI to import files or URLs (including YouTube), monitor progress, browse per-video graphs, and view a merged universe graph.
 - CLI for one-off transcription, diagram generation, and format conversions.
 
 ## Using in a Discord Guild
 
 - Start the bot with `DISCORD_TOKEN` set; if `GUILD_ID` is set at startup, slash commands register in that guild automatically.
-- Run `/reflect query:<text>` to answer questions against the configured CSV (`CSV_PATH`).
 - Run `/diagram` with either an audio attachment or a URL; the bot returns a graph plus a rendered diagram.
 - Join a voice channel and run `/record start`, then `/record stop`; the bot records participants, transcribes to VTT, and posts diagrams and graph artifacts when ready.
 - Outputs land under `.tmp/<universe>/<id>/` as `audio.mp3`, `audio.vtt`, `graph.json`, `kumu.json`, and `mermaid.(mdd|svg|png)`.
