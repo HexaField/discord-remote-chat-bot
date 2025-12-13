@@ -16,6 +16,7 @@ type RecSession = {
   recordingId: string
   guildId: string
   channelId: string
+  textChannelId?: string
   ws: WebSocket
   cleanup: () => Promise<void>
   done: Promise<{ recordingId: string; vttPath: string }>
@@ -29,7 +30,12 @@ function utcStamp() {
   return new Date().toISOString().replace(/[:.]/g, '-')
 }
 
-export async function startRecording(guildId: string, channel: VoiceBasedChannel, includeAudio = false) {
+export async function startRecording(
+  guildId: string,
+  channel: VoiceBasedChannel,
+  includeAudio = false,
+  textChannelId?: string
+) {
   if (sessions.has(guildId)) throw new Error('Recording already active in this guild')
 
   const recordingId = `${channel.id}-${utcStamp()}`
@@ -220,6 +226,7 @@ export async function startRecording(guildId: string, channel: VoiceBasedChannel
     recordingId,
     guildId: channel.guild.id,
     channelId: channel.id,
+    textChannelId,
     ws,
     cleanup,
     done,

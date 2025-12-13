@@ -7,7 +7,8 @@ import {
   GatewayIntentBits,
   Interaction,
   Message,
-  Partials
+  Partials,
+  TextBasedChannel
 } from 'discord.js'
 import 'dotenv/config'
 import fs from 'fs/promises'
@@ -405,7 +406,7 @@ client.on('interactionCreate', async (interaction: Interaction) => {
       try {
         await chat.deferReply()
         const includeAudio = chat.options.getBoolean('include_audio', false) ?? false
-        const sess = await startRecording(guild.id, voiceCh, includeAudio)
+        const sess = await startRecording(guild.id, voiceCh, includeAudio, chat.channelId)
         return chat.editReply(`🎙️ Recording started. ID: ${sess.recordingId}`)
       } catch (e: any) {
         try {
@@ -424,6 +425,23 @@ client.on('interactionCreate', async (interaction: Interaction) => {
         await chat.deferReply()
         const active = getActiveRecording(guild.id)
         const recordingId = active?.recordingId
+        type SendableTextChannel = Extract<TextBasedChannel, { send: unknown }>
+
+        const fetchTextChannel = async (channelId?: string | null): Promise<TextBasedChannel | null> => {
+          if (!channelId) return null
+          try {
+            const channel = await client.channels.fetch(channelId)
+            if (channel && channel.isTextBased()) return channel
+          } catch (e) {
+            console.warn('Failed to fetch transcript channel', e)
+          }
+          return null
+        }
+
+        const ensureSendableChannel = (channel: TextBasedChannel | null): channel is SendableTextChannel => {
+          if (!channel) return false
+          return 'send' in channel && typeof (channel as SendableTextChannel).send === 'function'
+        }
         // Send immediate feedback that we are still transcribing remaining chunks
         await chat.editReply(
           recordingId
@@ -433,15 +451,41 @@ client.on('interactionCreate', async (interaction: Interaction) => {
 
         const sess = await stopRecording(guild.id)
 
+        const transcriptChannel =
+          (await fetchTextChannel(process.env.RECORDING_TRANSCRIPT_CHANNEL_ID)) ||
+          (await fetchTextChannel(sess.textChannelId ?? active?.textChannelId)) ||
+          chat.channel
+
+        if (!ensureSendableChannel(transcriptChannel)) {
+          await chat.editReply({ content: 'Failed to find a text channel to post the transcript.' })
+          return
+        }
+
         const vtt = await fs.readFile(sess.vttPath)
-        await chat.editReply({
+        const transcriptPayload = {
           content: `✅ Transcript ready (ID: ${sess.recordingId}).`,
           files: [new AttachmentBuilder(Buffer.from(vtt), { name: 'audio.vtt' })]
-        })
+        }
+
+        if (transcriptChannel.id === chat.channelId) {
+          await chat.editReply(transcriptPayload)
+        } else {
+          await chat.editReply({
+            content: `✅ Transcript ready (ID: ${sess.recordingId}). Posted to <#${transcriptChannel.id}>.`
+          })
+          try {
+            await transcriptChannel.send(transcriptPayload)
+          } catch (e: any) {
+            await chat.editReply({
+              content: `❌ Failed to post transcript to <#${transcriptChannel.id}>: ${e?.message ?? e}`
+            })
+            return
+          }
+        }
 
         const followUpTranscription = async () => {
           try {
-            const followUp = await chat.followUp({ content: 'Generating diagrams from the transcript…' })
+            const followUp = await transcriptChannel.send({ content: 'Generating diagrams from the transcript…' })
             const out = await transcriptToDiagrams('recordings', sess.recordingId, '', async (m) => {
               try {
                 await followUp.edit({ content: `🔄 ${m}` })
@@ -459,7 +503,14 @@ client.on('interactionCreate', async (interaction: Interaction) => {
               ]
             })
           } catch (e: any) {
-            await chat.editReply({ content: `❌ Failed to stop/transcribe: ${e?.message ?? e}` })
+            try {
+              await transcriptChannel.send({ content: `❌ Failed to stop/transcribe: ${e?.message ?? e}` })
+            } catch {}
+            if (transcriptChannel.id !== chat.channelId) {
+              try {
+                await chat.editReply({ content: `❌ Failed to stop/transcribe: ${e?.message ?? e}` })
+              } catch {}
+            }
           }
         }
         followUpTranscription()
