@@ -77,12 +77,12 @@ export const toolsWorkflowDocument = {
   },
   roles: {
     chooser: {
-      systemPrompt: `You are a tool-selection assistant. Given the transcript and the user's message, choose exactly ONE tool from the available list. Only choose a tool if you are VERY CERTAIN it applies to the user request. If you are not very certain, return {"tool":"none"}. Output must be a single JSON object and nothing else, for example: {"tool":"diagram"}`,
+      systemPrompt: `Available tools and when to call them:\n{{user.tools}}\nYou are a tool-selection assistant. Given the transcript and the user's message, choose exactly ONE tool from the available list. Only choose a tool if you are VERY CERTAIN it applies to the user request. If you are not very certain, return {"tool":"none"}. Output must be a single JSON object and nothing else, for example: {"tool":"diagram"}`,
       parser: 'toolChoice'
     }
   },
   state: { initial: {} },
-  user: { instructions: { type: 'string', default: '' } },
+  user: { instructions: { type: 'string', default: '' }, tools: { type: 'string', default: '' } },
   flow: {
     round: {
       start: 'chooser',
@@ -90,11 +90,7 @@ export const toolsWorkflowDocument = {
         {
           key: 'chooser',
           role: 'chooser' as const,
-          prompt: [
-            'Available tools and when to call them:\n{{user.tools}}',
-            '{{user.referenced}}',
-            'User message:\n{{user.question}}'
-          ],
+          prompt: ['{{user.instructions}}'],
           exits: [{ condition: 'always', outcome: 'completed', reason: 'Tool selection complete' }]
         }
       ],
@@ -134,9 +130,7 @@ export async function chooseToolForMention(options: {
     ? `${options.referenced.attachments ? `Attachments: ${options.referenced.attachments.join(', ')}` : ''}\n${options.referenced.content ? `Referenced message content: ${options.referenced.content}` : ''}`
     : ''
 
-  const userInstructions = ['Tools: ' + toolLines, 'Context: ' + referencedText, 'Question: ' + options.question].join(
-    '\n'
-  )
+  const userInstructions = ['Context: ' + referencedText, 'Question: ' + options.question].join('\n')
 
   const onStream = (msg: AgentStreamEvent) => {
     if (!options.onProgress) return
@@ -144,7 +138,7 @@ export async function chooseToolForMention(options: {
   }
 
   const response = await runAgentWorkflow(toolsWorkflowDefinition, {
-    user: { instructions: userInstructions },
+    user: { instructions: userInstructions, tools: toolLines },
     model,
     sessionDir,
     workflowId: toolsWorkflowDefinition.id,
