@@ -210,7 +210,7 @@ export async function generateCausalRelationships(
   userPrompt?: string,
   onProgress?: (msg: string) => void
 ): Promise<CldParserOutput | { error: string }> {
-  const workspacePath = os.tmpdir() + `/cld-sessions`
+  const workspacePath = os.tmpdir() + `/cld-sessions/session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   const onStream = (msg: AgentStreamEvent) => {
     if (!onProgress) return
     switch (msg.step) {
