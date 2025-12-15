@@ -24,7 +24,7 @@ import { audioToTranscript, transcriptToDiagrams } from './audioToDiagram'
 import { getActiveRecording, startRecording, stopRecording } from './recording/discord'
 import { startTranscriptionServer } from './recording/server'
 import { generateMeetingDigest } from './workflows/meetingDigest.workflow'
-import { chooseToolForMention } from './workflows/tools'
+import { runToolWorkflowWithChooser } from './workflows/tools/runToolWorkflow'
 
 const DISCORD_TOKEN: string | undefined = process.env.DISCORD_TOKEN
 const LLM_URL: string | undefined = process.env.LLM_URL
@@ -379,7 +379,7 @@ client.on('interactionCreate', async (interaction: Interaction) => {
 
       try {
         const digest = await generateMeetingDigest(
-          transcriptLines,
+          transcriptLines.join('\n'),
           prompt,
           async (m) => {
             try {
@@ -572,91 +572,61 @@ client.on('messageCreate', async (message) => {
     }
     if (!contextParts.length) contextParts.push(question)
     const fullContext = contextParts.join('\n\n')
-    const chooser = await chooseToolForMention({
+    // Use the centralized chooser+executor to reduce bespoke glue per-tool
+    const referencedForChooser = referencedContext
+      ? { attachments: Object.keys(referencedContext.attachments || {}), content: referencedContext.content }
+      : undefined
+
+    const combined = await runToolWorkflowWithChooser<any>({
       question,
-      referenced: referencedContext?.attachments,
-      model: ASKQUESTION_CONSTANTS.MODEL
+      referenced: referencedForChooser,
+      model: ASKQUESTION_CONSTANTS.MODEL,
+      sessionDir: undefined,
+      url: message.attachments.first()?.url ?? message.content.match(/https?:\/\/\S+/)?.[0],
+      onProgress
     })
-    const tool = chooser?.tool
-    if (tool && tool !== 'none') {
-      await reply.edit(`Using ${tool} tool...`)
 
-      if (tool === 'diagram') {
-        const attachment = message.attachments.first()
-        const url = attachment?.url ?? message.content.match(/https?:\/\/\S+/)?.[0]
-        if (!url && !referencedContext) {
-          await reply.edit('I could not find an audio attachment or URL to generate a diagram from.')
-          return
-        }
-        await reply.edit('Generating diagram from the provided audio…')
-        const id = referencedContext ? undefined : await audioToTranscript('discord', url!, onProgress)
-        const out = await transcriptToDiagrams('discord', id, fullContext, question, onProgress, false)
-        const diagramData = await fs.readFile(out.kumuPath, 'utf-8')
-        const pngData = await fs.readFile(out.pngPath)
-        await reply.edit({
-          content: 'Here is your diagram:',
-          files: [
-            new AttachmentBuilder(Buffer.from(diagramData), { name: 'kumu.json' }),
-            new AttachmentBuilder(pngData, { name: 'diagram.png' })
-          ]
-        })
-        return
+    await reply.edit(`Using ${combined.tool} tool...`)
+
+    if (combined.tool === 'none') {
+      await reply.edit('No suitable tool found to handle this request.')
+      return
+    }
+
+    try {
+      const parsed = combined.parsed || {}
+      // Attach any known artifact paths generically
+      const files: AttachmentBuilder[] = []
+      const mermaidPath = parsed.mermaidPath || parsed.kumuPath
+      if (mermaidPath) {
+        const data = await fs.readFile(mermaidPath, 'utf-8')
+        files.push(
+          new AttachmentBuilder(Buffer.from(data), { name: mermaidPath.endsWith('.mmd') ? 'diagram.mmd' : 'kumu.json' })
+        )
+      }
+      if (parsed.pngPath) {
+        const png = await fs.readFile(parsed.pngPath)
+        files.push(new AttachmentBuilder(png, { name: 'diagram.png' }))
+      }
+      if (parsed.vttPath) {
+        const vtt = await fs.readFile(parsed.vttPath, 'utf-8')
+        files.push(new AttachmentBuilder(Buffer.from(vtt, 'utf-8'), { name: `transcript.txt` }))
       }
 
-      if (tool === 'transcribe') {
-        const attachment = message.attachments.first()
-        const url = attachment?.url ?? message.content.match(/https?:\/\/\S+/)?.[0]
-        if (!url) {
-          await reply.edit('I could not find an audio attachment or URL to transcribe.')
-          return
+      if (files.length) {
+        await reply.edit({ content: 'Here is the result:', files })
+      } else if (parsed && parsed.transcript) {
+        const text = parsed.transcript
+        if (text.length < 1900) await reply.edit({ content: `Transcript:\n\n${text}` })
+        else {
+          const att = new AttachmentBuilder(Buffer.from(text, 'utf-8'), { name: `transcript.txt` })
+          await reply.edit({ content: 'Transcript generated:', files: [att] })
         }
-        await reply.edit('Transcribing audio…')
-        try {
-          const id = await audioToTranscript('discord', url, onProgress)
-          const vttPath = path.join(process.cwd(), '.tmp', 'discord', id, 'audio.vtt')
-          const vtt = await fs.readFile(vttPath, 'utf-8')
-          if (vtt.length < 1900) {
-            await reply.edit({ content: `Transcript:\n\n${vtt}` })
-          } else {
-            const att = new AttachmentBuilder(Buffer.from(vtt, 'utf-8'), { name: `transcript-${id}.txt` })
-            await reply.edit({ content: 'Transcript generated:', files: [att] })
-          }
-        } catch (e: any) {
-          await reply.edit({ content: `Failed to transcribe: ${e?.message ?? e}` })
-        }
-        return
+      } else {
+        await reply.edit({ content: 'Tool executed but produced no attachable artifacts.' })
       }
-
-      if (tool === 'meeting_summarise') {
-        const transcriptLines = fullContext
-          .split(/\r?\n/)
-          .map((l) => l.trim())
-          .filter(Boolean)
-        if (!transcriptLines.length) {
-          await reply.edit('No transcript text available to summarise.')
-          return
-        }
-        await reply.edit('Generating meeting summary…')
-        try {
-          const digest = await generateMeetingDigest(transcriptLines, undefined, async (m) => {
-            try {
-              await message.channel.send(`🔄 ${m}`)
-            } catch {}
-          })
-          const formatted = formatMeetingDigest(digest)
-          if (formatted.length < 2000) {
-            await reply.edit({ content: formatted })
-          } else {
-            const att = new AttachmentBuilder(Buffer.from(formatted, 'utf-8'), {
-              name: `meeting-digest.txt`
-            })
-            await reply.edit({ content: 'Here is the meeting digest:', files: [att] })
-          }
-        } catch (e: any) {
-          await reply.edit({ content: `Failed to generate meeting digest: ${e?.message ?? e}` })
-        }
-        return
-      }
+    } catch (e: any) {
+      await reply.edit({ content: `Failed to run tool: ${e?.message ?? e}` })
     }
 
     await reply.edit('Thinking...')
@@ -700,7 +670,7 @@ client.on('threadCreate', async (thread) => {
   try {
     const starter = await thread.fetchStarterMessage()
     if (!starter) return
-    await cloneAskQuestionContext((starter as any).id, thread.id)
+    await cloneAskQuestionContext(starter.id, thread.id)
   } catch (e) {
     console.warn('threadCreate handler failed', e)
   }

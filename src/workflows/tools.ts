@@ -2,8 +2,8 @@ import {
   AgentStreamEvent,
   AgentWorkflowDefinition,
   extractJson,
-  hydrateWorkflowDefinition,
   runAgentWorkflow,
+  validateWorkflowDefinition,
   WorkflowParserJsonOutput,
   type AgentWorkflowResult
 } from '@hexafield/agent-workflow'
@@ -20,6 +20,8 @@ export type ToolDef = {
   callWhen: string
   /** brief description */
   description?: string
+  /** workflow registry key to execute for this tool (optional) */
+  workflow?: string
 }
 
 export const TOOLS: ToolDef[] = [
@@ -28,20 +30,23 @@ export const TOOLS: ToolDef[] = [
     title: 'Transcribe Audio/Video',
     callWhen:
       'Call this when the user supplies or references an audio/video file (upload or URL) and asks for a transcript or asks questions that require transcribing audio/video content.',
-    description: 'Upload audio or provide a URL to download video and produce a speaker-aligned transcript.'
+    description: 'Upload audio or provide a URL to download video and produce a speaker-aligned transcript.',
+    workflow: 'transcribe'
   },
   {
     name: 'diagram',
     title: 'Diagram Generation',
     callWhen: 'Call this when the user asks to produce a diagram.',
-    description: 'Turn audio, youtube videos or text content into a causal loop diagram.'
+    description: 'Turn audio, youtube videos or text content into a causal loop diagram.',
+    workflow: 'diagram'
   },
   {
     name: 'meeting_summarise',
     title: 'Meeting Summarise',
     callWhen:
       'Call this when the user asks for a meeting summary, insights, action items, decisions or open questions derived from a meeting transcript or recording.',
-    description: 'Generate meeting digest: insights, action items, decisions, open questions.'
+    description: 'Generate meeting digest: insights, action items, decisions, open questions.',
+    workflow: 'meeting_summarise'
   }
 ]
 
@@ -50,9 +55,52 @@ export const TOOL_NAMES = TOOLS.map((t) => t.name)
 const DEFAULT_MODEL = process.env.TOOLS_MODEL || 'github-copilot/gpt-5-mini'
 const DEFAULT_SESSION_DIR = path.resolve(appRootPath.path, '.tmp', 'tools-sessions')
 
+const ALLOWED_COMMANDS = new Set(['yt-dlp', 'whisper-cli', 'mmdc'])
+const ALLOWED_SHELL_PRIMITIVES = new Set([
+  'bash',
+  'set',
+  'trap',
+  'rm',
+  'mktemp',
+  'cat',
+  'printf',
+  'base64',
+  'tr'
+])
+const MAX_USER_ARGS = 20
+const MAX_ARG_LENGTH = 20000
+
 async function ensureSessionDir(sessionDir = DEFAULT_SESSION_DIR) {
   await fsp.mkdir(sessionDir, { recursive: true })
   return sessionDir
+}
+
+export function validateCliArgs(args: unknown, step: { command: string; args?: unknown }): boolean {
+  if (!Array.isArray(args)) return false
+
+  // Direct invocation of an allowed CLI
+  if (ALLOWED_COMMANDS.has(step.command)) {
+    return (
+      args.length <= MAX_USER_ARGS &&
+      args.every((arg) => typeof arg === 'string' && arg.length > 0 && arg.length <= MAX_ARG_LENGTH)
+    )
+  }
+
+  // Guarded bash that only touches allowed commands and simple primitives
+  if (step.command === 'bash') {
+    const [flag, script] = args as unknown[]
+    if (flag !== '-lc' || typeof script !== 'string') return false
+    const lines = script.split(/\n+/)
+
+    return lines.every((line) => {
+      const trimmed = line.trim()
+      if (!trimmed || trimmed.startsWith('#')) return true
+      const firstToken = trimmed.split(/\s+/)[0]
+      return ALLOWED_COMMANDS.has(firstToken) || ALLOWED_SHELL_PRIMITIVES.has(firstToken)
+    })
+  }
+
+  return false
 }
 
 /* Workflow document for tool selection */
@@ -103,7 +151,7 @@ export const toolsWorkflowDocument = {
 export type ToolsWorkflowDefinition = typeof toolsWorkflowDocument
 export type ToolsParserOutput = WorkflowParserJsonOutput<(typeof toolsWorkflowDocument)['parsers']['toolChoice']>
 
-export const toolsWorkflowDefinition = hydrateWorkflowDefinition(toolsWorkflowDocument)
+export const toolsWorkflowDefinition = validateWorkflowDefinition(toolsWorkflowDocument)
 export type ToolsWorkflowResult = AgentWorkflowResult<ToolsWorkflowDefinition>
 
 const extractToolsOutput = (result: ToolsWorkflowResult): ToolsParserOutput | undefined => {

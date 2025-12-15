@@ -1,8 +1,8 @@
 import {
   AgentStreamEvent,
   AgentWorkflowDefinition,
-  hydrateWorkflowDefinition,
   runAgentWorkflow,
+  validateWorkflowDefinition,
   WorkflowParserJsonOutput,
   type AgentWorkflowResult
 } from '@hexafield/agent-workflow'
@@ -203,7 +203,7 @@ export type MeetingDigestParserOutput = WorkflowParserJsonOutput<
   (typeof meetingDigestWorkflowDocument)['parsers']['meetingDigest']
 >
 
-export const meetingDigestWorkflowDefinition = hydrateWorkflowDefinition(meetingDigestWorkflowDocument)
+export const meetingDigestWorkflowDefinition = validateWorkflowDefinition(meetingDigestWorkflowDocument)
 export type MeetingDigestWorkflowResult = AgentWorkflowResult<MeetingDigestWorkflowDefinition>
 
 const extractMeetingDigest = (result: MeetingDigestWorkflowResult): MeetingDigestParserOutput | undefined => {
@@ -212,7 +212,7 @@ const extractMeetingDigest = (result: MeetingDigestWorkflowResult): MeetingDiges
 }
 
 export async function generateMeetingDigest(
-  transcriptLines: string[],
+  transcript: string,
   userPrompt: string | undefined,
   onProgress?: (msg: string) => void,
   model = 'github-copilot/gpt-5-mini',
@@ -242,7 +242,7 @@ export async function generateMeetingDigest(
     }
   }
 
-  let userInstructions = transcriptLines.join('\n')
+  let userInstructions = transcript
 
   if (userPrompt) {
     userInstructions = `User prompt: ${userPrompt}\n\nSource text:\n${userInstructions}`
