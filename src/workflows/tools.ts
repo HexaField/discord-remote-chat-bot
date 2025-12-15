@@ -2,7 +2,7 @@ import {
   AgentStreamEvent,
   AgentWorkflowDefinition,
   extractJson,
-  hydrateWorkflowDefinition,
+  validateWorkflowDefinition,
   runAgentWorkflow,
   WorkflowParserJsonOutput,
   type AgentWorkflowResult
@@ -103,7 +103,7 @@ export const toolsWorkflowDocument = {
 export type ToolsWorkflowDefinition = typeof toolsWorkflowDocument
 export type ToolsParserOutput = WorkflowParserJsonOutput<(typeof toolsWorkflowDocument)['parsers']['toolChoice']>
 
-export const toolsWorkflowDefinition = hydrateWorkflowDefinition(toolsWorkflowDocument)
+export const toolsWorkflowDefinition = validateWorkflowDefinition(toolsWorkflowDocument)
 export type ToolsWorkflowResult = AgentWorkflowResult<ToolsWorkflowDefinition>
 
 const extractToolsOutput = (result: ToolsWorkflowResult): ToolsParserOutput | undefined => {

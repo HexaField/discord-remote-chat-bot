@@ -1,7 +1,7 @@
 import {
   AgentStreamEvent,
   AgentWorkflowDefinition,
-  hydrateWorkflowDefinition,
+  validateWorkflowDefinition,
   runAgentWorkflow,
   WorkflowParserJsonOutput,
   type AgentWorkflowResult
@@ -197,7 +197,7 @@ No markdown fences or commentary.`,
 export type CldWorkflowDefinition = typeof cldWorkflowDocument
 export type CldParserOutput = WorkflowParserJsonOutput<(typeof cldWorkflowDocument)['parsers']['cld']>
 
-export const cldWorkflowDefinition = hydrateWorkflowDefinition(cldWorkflowDocument)
+export const cldWorkflowDefinition = validateWorkflowDefinition(cldWorkflowDocument)
 export type CldWorkflowResult = AgentWorkflowResult<CldWorkflowDefinition>
 
 const extractCldOutput = (result: CldWorkflowResult): CldParserOutput | undefined => {

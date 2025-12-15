@@ -1,7 +1,7 @@
 import {
   AgentStreamEvent,
   AgentWorkflowDefinition,
-  hydrateWorkflowDefinition,
+  validateWorkflowDefinition,
   runAgentWorkflow,
   WorkflowParserJsonOutput,
   type AgentWorkflowResult
@@ -203,7 +203,7 @@ export type MeetingDigestParserOutput = WorkflowParserJsonOutput<
   (typeof meetingDigestWorkflowDocument)['parsers']['meetingDigest']
 >
 
-export const meetingDigestWorkflowDefinition = hydrateWorkflowDefinition(meetingDigestWorkflowDocument)
+export const meetingDigestWorkflowDefinition = validateWorkflowDefinition(meetingDigestWorkflowDocument)
 export type MeetingDigestWorkflowResult = AgentWorkflowResult<MeetingDigestWorkflowDefinition>
 
 const extractMeetingDigest = (result: MeetingDigestWorkflowResult): MeetingDigestParserOutput | undefined => {
