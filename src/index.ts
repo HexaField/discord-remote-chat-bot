@@ -23,8 +23,8 @@ import {
 import { audioToTranscript, transcriptToDiagrams } from './audioToDiagram'
 import { getActiveRecording, startRecording, stopRecording } from './recording/discord'
 import { startTranscriptionServer } from './recording/server'
+import { runToolWorkflow } from './tools'
 import { generateMeetingDigest } from './workflows/meetingDigest.workflow'
-import { runToolWorkflowWithChooser } from './workflows/tools/runToolWorkflow'
 
 const DISCORD_TOKEN: string | undefined = process.env.DISCORD_TOKEN
 const LLM_URL: string | undefined = process.env.LLM_URL
@@ -588,7 +588,7 @@ client.on('messageCreate', async (message) => {
       ? { attachments: Object.keys(referencedContext.attachments || {}), content: referencedContext.content }
       : undefined
 
-    const combined = await runToolWorkflowWithChooser<any>({
+    const combined = await runToolWorkflow({
       question,
       referenced: referencedForChooser,
       model: ASKQUESTION_CONSTANTS.MODEL,
@@ -597,47 +597,42 @@ client.on('messageCreate', async (message) => {
       onProgress
     })
 
-    await reply.edit(`Using ${combined.tool} tool...`)
+    if (combined.tool !== 'none') {
+      try {
+        const parsed = combined.parsed || {}
+        const filesFromWorkflow = parsed && typeof parsed === 'object' ? (parsed as any).files : undefined
+        const attachments: AttachmentBuilder[] = []
 
-    if (combined.tool === 'none') {
-      await reply.edit('No suitable tool found to handle this request.')
-      return
-    }
-
-    try {
-      const parsed = combined.parsed || {}
-      const filesFromWorkflow = parsed && typeof parsed === 'object' ? (parsed as any).files : undefined
-      const attachments: AttachmentBuilder[] = []
-
-      if (filesFromWorkflow && typeof filesFromWorkflow === 'object') {
-        for (const [name, value] of Object.entries(filesFromWorkflow)) {
-          if (value === undefined || value === null) continue
-          const buf = Buffer.isBuffer(value)
-            ? value
-            : value instanceof Uint8Array
-              ? Buffer.from(value)
-              : Buffer.from(typeof value === 'string' ? value : JSON.stringify(value), 'utf-8')
-          attachments.push(new AttachmentBuilder(buf, { name }))
+        if (filesFromWorkflow && typeof filesFromWorkflow === 'object') {
+          for (const [name, value] of Object.entries(filesFromWorkflow)) {
+            if (value === undefined || value === null) continue
+            const buf = Buffer.isBuffer(value)
+              ? value
+              : value instanceof Uint8Array
+                ? Buffer.from(value)
+                : Buffer.from(typeof value === 'string' ? value : JSON.stringify(value), 'utf-8')
+            attachments.push(new AttachmentBuilder(buf, { name }))
+          }
         }
-      }
 
-      let responseText = typeof (parsed as any).response === 'string' ? (parsed as any).response : undefined
+        let responseText = typeof (parsed as any).response === 'string' ? (parsed as any).response : undefined
 
-      if (responseText && responseText.length > 1900) {
-        attachments.push(new AttachmentBuilder(Buffer.from(responseText, 'utf-8'), { name: 'response.txt' }))
-        responseText = 'Response attached.'
-      }
+        if (responseText && responseText.length > 1900) {
+          attachments.push(new AttachmentBuilder(Buffer.from(responseText, 'utf-8'), { name: 'response.txt' }))
+          responseText = 'Response attached.'
+        }
 
-      if (attachments.length || responseText) {
-        await reply.edit({
-          content: responseText || 'Here is the result:',
-          files: attachments.length ? attachments : undefined
-        })
-      } else {
-        await reply.edit({ content: 'Tool executed but produced no attachable artifacts.' })
+        if (attachments.length || responseText) {
+          await reply.edit({
+            content: responseText || 'Here is the result:',
+            files: attachments.length ? attachments : undefined
+          })
+        } else {
+          await reply.edit({ content: 'Tool executed but produced no attachable artifacts.' })
+        }
+      } catch (e: any) {
+        await reply.edit({ content: `Failed to run tool: ${e?.message ?? e}` })
       }
-    } catch (e: any) {
-      await reply.edit({ content: `Failed to run tool: ${e?.message ?? e}` })
     }
 
     await reply.edit('Thinking...')

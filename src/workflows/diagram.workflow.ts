@@ -59,7 +59,7 @@ export const diagramWorkflowDocument = {
           type: 'cli',
           command: 'mmdc',
           argsObject: { input: '-', output: '-' },
-          stdinFrom: '{{steps.mermaid.raw||""}}',
+          stdinFrom: '{{steps.mermaid.raw}}',
           capture: 'buffer',
           next: 'emit'
         },

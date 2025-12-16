@@ -14,6 +14,31 @@ import { spawn } from 'node:child_process'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { cldWorkflowDocument } from './workflows/cld.workflow'
+import { diagramWorkflowDocument } from './workflows/diagram.workflow'
+import { transcribeWorkflowDocument } from './workflows/transcribe.workflow'
+
+const registry: Record<string, any> = {}
+
+export function registerToolWorkflow(name: string, doc: any) {
+  const def = validateWorkflowDefinition(doc)
+  registry[name] = def
+  return def
+}
+
+// register built-in tools
+registerToolWorkflow('transcribe', transcribeWorkflowDocument)
+registerToolWorkflow('diagram', diagramWorkflowDocument)
+// cld.v1 is referenced by diagram workflow; register under its own id too
+registerToolWorkflow('cld', cldWorkflowDocument)
+
+export function getToolWorkflowByName(name: string) {
+  return registry[name]
+}
+
+export function listToolWorkflows() {
+  return Object.keys(registry)
+}
 
 export type ToolDef = {
   /** internal name used when selecting a tool */
@@ -437,8 +462,71 @@ export async function chooseToolForMention(options: {
   return { tool: 'none' }
 }
 
-export default {
-  TOOLS,
-  TOOL_NAMES,
-  chooseToolForMention
+export async function runToolWorkflow<TParsed = unknown>(options: {
+  question: string
+  referenced?: { attachments?: string[]; content?: string }
+  model?: string
+  sessionDir?: string
+  url?: string
+  onProgress?: (m: string) => void
+}): Promise<{ tool: string; result?: any; parsed?: TParsed; sessionDir?: string }> {
+  const chooser = await chooseToolForMention({
+    question: options.question,
+    referenced: options.referenced,
+    model: options.model,
+    sessionDir: options.sessionDir,
+    onProgress: options.onProgress
+  })
+
+  const tool = chooser?.tool || 'none'
+  if (!tool || tool === 'none') return { tool }
+
+  // Find tool registry entry to determine workflow mapping
+  const toolDef = TOOLS.find((t) => t.name === tool)
+  const workflowKey = toolDef?.workflow || tool
+
+  // Build generic inputs: prefer transcript if available, else url
+  const inputs: Record<string, any> = {}
+  if (options.referenced?.content) inputs.transcript = options.referenced.content
+  if (options.url) inputs.sourceUrl = options.url
+  if (options.sessionDir) inputs.sessionDir = options.sessionDir
+
+  try {
+    const workflowDef = getToolWorkflowByName(workflowKey)
+    if (!workflowDef) throw new Error(`Unknown tool workflow: ${workflowKey}`)
+
+    const sessionDir = options.sessionDir || path.resolve(process.cwd(), '.tmp', 'tools', workflowKey)
+    await fs.mkdir(sessionDir, { recursive: true })
+
+    const onStream = (msg: any) => {
+      if (!options.onProgress) return
+      // Map step names to friendly messages where possible
+      if (msg && typeof msg === 'object' && 'step' in msg) {
+        options.onProgress(`[${workflowKey}] ${msg.step}...`)
+      } else {
+        options.onProgress(`[${workflowKey}] progress`)
+      }
+    }
+
+    const response = await runAgentWorkflow(workflowDef, {
+      user: inputs,
+      model: options.model || workflowDef.model,
+      sessionDir,
+      workflowId: workflowDef.id,
+      workflowSource: 'user',
+      workflowLabel: workflowDef.description,
+      onStream,
+      runCliArgs: (input) => runCliArgs(input, { defaultCwd: sessionDir })
+    })
+
+    const result = await response.result
+    const lastRound = result.rounds[result.rounds.length - 1]
+    const stepKeys = lastRound?.steps ? Object.keys(lastRound.steps) : []
+    const lastStep = stepKeys.length ? lastRound.steps[stepKeys[stepKeys.length - 1]] : undefined
+    const parsed = lastStep?.parsed as TParsed | undefined
+
+    return { tool, result, parsed, sessionDir }
+  } catch {
+    return { tool }
+  }
 }
