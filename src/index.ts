@@ -141,31 +141,42 @@ const formatMeetingDigest = (digest: any) => {
 }
 
 async function buildReferencedMessageContext(message: Message) {
-  if (!message.reference?.messageId) return
+  let referenced: Message | null | undefined
 
-  try {
-    const referenced = await message.fetchReference()
-
-    const attachmentTexts = {} as Record<string, string>
-    for (const attachment of referenced.attachments.values()) {
-      if (!isTextAttachment(attachment.name, attachment.contentType)) continue
-      try {
-        const res = await fetch(attachment.url)
-        if (!res.ok) throw new Error(`Failed to fetch attachment (${res.status})`)
-        const text = await res.text()
-        attachmentTexts[attachment.name || attachment.url] = text
-      } catch (e) {
-        console.warn('Failed to download referenced attachment', e)
-      }
+  if (message.reference?.messageId) {
+    try {
+      referenced = await message.fetchReference()
+    } catch (e) {
+      console.warn('Failed to fetch referenced message', e)
     }
+  }
 
-    return {
-      content: referenced.content,
-      attachments: attachmentTexts
+  if (!referenced && message.channel?.isThread?.()) {
+    try {
+      referenced = await message.channel.fetchStarterMessage()
+    } catch (e) {
+      console.warn('Failed to fetch thread starter message', e)
     }
-  } catch (e) {
-    console.warn('Failed to fetch referenced message', e)
-    return
+  }
+
+  if (!referenced) return
+
+  const attachmentTexts = {} as Record<string, string>
+  for (const attachment of referenced.attachments.values()) {
+    if (!isTextAttachment(attachment.name, attachment.contentType)) continue
+    try {
+      const res = await fetch(attachment.url)
+      if (!res.ok) throw new Error(`Failed to fetch attachment (${res.status})`)
+      const text = await res.text()
+      attachmentTexts[attachment.name || attachment.url] = text
+    } catch (e) {
+      console.warn('Failed to download referenced attachment', e)
+    }
+  }
+
+  return {
+    content: referenced.content,
+    attachments: attachmentTexts
   }
 }
 
@@ -538,7 +549,7 @@ client.on('interactionCreate', async (interaction: Interaction) => {
 })
 
 client.on('messageCreate', async (message) => {
-  if (message.author.bot) return
+  if (message.author.bot || message.system) return
 
   const botId = client.user?.id
   const isMention = botId ? message.mentions.has(botId) : false
