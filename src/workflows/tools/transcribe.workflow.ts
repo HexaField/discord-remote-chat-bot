@@ -1,35 +1,34 @@
 import { AgentWorkflowDefinition } from '@hexafield/agent-workflow'
-import path from 'node:path'
 
 const DEFAULT_MODEL = process.env.TOOLS_MODEL || 'github-copilot/gpt-5-mini'
 
 export const transcribeWorkflowDocument = {
   $schema: 'https://hyperagent.dev/schemas/agent-workflow.json',
   id: 'tools.transcribe.v1',
-  description: 'Download audio via yt-dlp and transcribe using Whisper (CLI steps).',
+  description: 'Download audio via yt-dlp and transcribe using whisper-cli. No shell, only allowed CLIs.',
   model: DEFAULT_MODEL,
   sessions: { roles: [{ role: 'worker' as const, nameTemplate: '{{runId}}-transcribe' }] },
   parsers: {
-    transcribeResult: {
+    toolResult: {
       type: 'object',
       properties: {
-        vttPath: { type: 'string' },
-        transcript: { type: 'string' }
+        files: { type: 'object', properties: {}, additionalProperties: true },
+        response: { type: 'string' }
       },
-      required: ['vttPath', 'transcript'],
-      additionalProperties: false
+      required: ['files'],
+      additionalProperties: true
     }
   },
   roles: {
     worker: {
-      systemPrompt: 'Transcribe audio files. Use the CLI steps to download and transcribe audio. Return parsed { vttPath, transcript }.',
-      parser: 'transcribeResult',
-      tools: { webfetch: true, bash: true, read: true, write: true }
+      systemPrompt:
+        'Transcribe audio files without using any shell. Use yt-dlp to download audio and whisper-cli to produce VTT. Return { files, response } where files include audio.vtt and transcript.txt.',
+      parser: 'toolResult',
+      tools: { webfetch: true, read: true, write: true }
     }
   },
   user: {
-    url: { type: 'string', default: '' },
-    sessionDir: { type: 'string', default: path.resolve(process.cwd(), '.tmp', 'transcribe') }
+    sourceUrl: { type: 'string', default: '' }
   },
   flow: {
     round: {
@@ -39,23 +38,34 @@ export const transcribeWorkflowDocument = {
           key: 'download',
           type: 'cli',
           command: 'yt-dlp',
-          args: ['-x', '--audio-format', 'wav', '-o', '{{user.sessionDir}}/{{run.id}}.%(ext)s', '{{user.url}}'],
-          next: 'whisper'
+          argsObject: {
+            url: '{{user.sourceUrl}}',
+            output: '-',
+            audioFormat: 'wav',
+            extractAudio: 'true'
+          },
+          capture: 'buffer',
+          next: 'transcribe'
         },
         {
-          key: 'whisper',
+          key: 'transcribe',
           type: 'cli',
-          command: 'whisper',
-          // whisper CLI: whisper <input> --model small --output_format vtt --output_dir <dir>
-          args: ['{{steps.download.args.0||""}}', '--model', 'small', '--output_format', 'vtt', '--output_dir', '{{user.sessionDir}}'],
+          command: 'whisper-cli',
+          argsObject: { input: '-', outputDir: '-' },
+          stdinFrom: 'steps.download.parsed.stdoutBuffer',
+          capture: 'buffer',
           next: 'emit'
         },
         {
           key: 'emit',
-          role: 'worker' as const,
-          prompt: [
-            'Finalize transcription result. The whisper CLI wrote a .vtt file into {{user.sessionDir}} with a filename starting with {{run.id}}. Read that file and return { vttPath, transcript }.'
-          ],
+          type: 'transform',
+          template: {
+            files: {
+              'audio.vtt': '$.steps.transcribe.parsed.stdoutBuffer',
+              'transcript.txt': '$.steps.transcribe.parsed.stdout'
+            },
+            response: '$.steps.transcribe.parsed.stdout'
+          },
           exits: [{ condition: 'always', outcome: 'completed', reason: 'transcription complete' }]
         }
       ],

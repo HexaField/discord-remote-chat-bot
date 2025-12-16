@@ -606,33 +606,33 @@ client.on('messageCreate', async (message) => {
 
     try {
       const parsed = combined.parsed || {}
-      // Attach any known artifact paths generically
-      const files: AttachmentBuilder[] = []
-      const mermaidPath = parsed.mermaidPath || parsed.kumuPath
-      if (mermaidPath) {
-        const data = await fs.readFile(mermaidPath, 'utf-8')
-        files.push(
-          new AttachmentBuilder(Buffer.from(data), { name: mermaidPath.endsWith('.mmd') ? 'diagram.mmd' : 'kumu.json' })
-        )
-      }
-      if (parsed.pngPath) {
-        const png = await fs.readFile(parsed.pngPath)
-        files.push(new AttachmentBuilder(png, { name: 'diagram.png' }))
-      }
-      if (parsed.vttPath) {
-        const vtt = await fs.readFile(parsed.vttPath, 'utf-8')
-        files.push(new AttachmentBuilder(Buffer.from(vtt, 'utf-8'), { name: `transcript.txt` }))
+      const filesFromWorkflow = parsed && typeof parsed === 'object' ? (parsed as any).files : undefined
+      const attachments: AttachmentBuilder[] = []
+
+      if (filesFromWorkflow && typeof filesFromWorkflow === 'object') {
+        for (const [name, value] of Object.entries(filesFromWorkflow)) {
+          if (value === undefined || value === null) continue
+          const buf = Buffer.isBuffer(value)
+            ? value
+            : value instanceof Uint8Array
+              ? Buffer.from(value)
+              : Buffer.from(typeof value === 'string' ? value : JSON.stringify(value), 'utf-8')
+          attachments.push(new AttachmentBuilder(buf, { name }))
+        }
       }
 
-      if (files.length) {
-        await reply.edit({ content: 'Here is the result:', files })
-      } else if (parsed && parsed.transcript) {
-        const text = parsed.transcript
-        if (text.length < 1900) await reply.edit({ content: `Transcript:\n\n${text}` })
-        else {
-          const att = new AttachmentBuilder(Buffer.from(text, 'utf-8'), { name: `transcript.txt` })
-          await reply.edit({ content: 'Transcript generated:', files: [att] })
-        }
+      let responseText = typeof (parsed as any).response === 'string' ? (parsed as any).response : undefined
+
+      if (responseText && responseText.length > 1900) {
+        attachments.push(new AttachmentBuilder(Buffer.from(responseText, 'utf-8'), { name: 'response.txt' }))
+        responseText = 'Response attached.'
+      }
+
+      if (attachments.length || responseText) {
+        await reply.edit({
+          content: responseText || 'Here is the result:',
+          files: attachments.length ? attachments : undefined
+        })
       } else {
         await reply.edit({ content: 'Tool executed but produced no attachable artifacts.' })
       }

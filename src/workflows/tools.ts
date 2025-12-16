@@ -5,10 +5,14 @@ import {
   runAgentWorkflow,
   validateWorkflowDefinition,
   WorkflowParserJsonOutput,
-  type AgentWorkflowResult
+  type AgentWorkflowResult,
+  type CliRuntimeInvocation,
+  type CliRuntimeResult
 } from '@hexafield/agent-workflow'
 import appRootPath from 'app-root-path'
-import fsp from 'node:fs/promises'
+import { spawn } from 'node:child_process'
+import fs from 'node:fs/promises'
+import os from 'node:os'
 import path from 'node:path'
 
 export type ToolDef = {
@@ -54,53 +58,260 @@ export const TOOL_NAMES = TOOLS.map((t) => t.name)
 
 const DEFAULT_MODEL = process.env.TOOLS_MODEL || 'github-copilot/gpt-5-mini'
 const DEFAULT_SESSION_DIR = path.resolve(appRootPath.path, '.tmp', 'tools-sessions')
-
-const ALLOWED_COMMANDS = new Set(['yt-dlp', 'whisper-cli', 'mmdc'])
-const ALLOWED_SHELL_PRIMITIVES = new Set([
-  'bash',
-  'set',
-  'trap',
-  'rm',
-  'mktemp',
-  'cat',
-  'printf',
-  'base64',
-  'tr'
-])
-const MAX_USER_ARGS = 20
 const MAX_ARG_LENGTH = 20000
+const MAX_CAPTURE_BYTES = 25 * 1024 * 1024
+
+const expectString = (value: unknown, label: string): string => {
+  if (typeof value !== 'string' || !value.length || value.length > MAX_ARG_LENGTH) {
+    throw new Error(`Invalid ${label}`)
+  }
+  return value
+}
+
+const parseBoolean = (value: unknown, defaultValue: boolean): boolean => {
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'string') {
+    if (value.toLowerCase() === 'false') return false
+    if (value.toLowerCase() === 'true') return true
+  }
+  return defaultValue
+}
+
+type BuildResult = {
+  argv: string[]
+  /** whether to pipe provided stdinValue into the spawned process */
+  allowStdin?: boolean
+  postProcess?: (context: { cwd: string; args: Record<string, unknown>; result: CliRuntimeResult }) => Promise<void>
+}
+
+type CommandBuilder = (
+  args: Record<string, any>,
+  cwd: string,
+  stdinValue?: string | Buffer | Uint8Array
+) => Promise<BuildResult> | BuildResult
+
+const COMMAND_BUILDERS: Record<string, CommandBuilder> = {
+  'yt-dlp': async (args) => {
+    const url = expectString(args.url || args.arg0, 'url')
+    const output = expectString(args.output || 'audio.%(ext)s', 'output')
+    const audioFormat = expectString(args.audioFormat || 'wav', 'audioFormat')
+    const extractAudio = parseBoolean(args.extractAudio, true)
+
+    let workingOutput = output
+    let captureFromFile = false
+    let cleanup: (() => Promise<void>) | undefined
+
+    if (output === '-') {
+      const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'yt-dlp-out-'))
+      workingOutput = path.join(tmpDir, 'audio.%(ext)s')
+      captureFromFile = true
+      cleanup = async () => {
+        await fs.rm(tmpDir, { recursive: true, force: true })
+      }
+    }
+
+    const argv: string[] = []
+    if (extractAudio) argv.push('-x')
+    argv.push('--audio-format', audioFormat, '-o', workingOutput, url)
+
+    const postProcess = async ({ result }: { cwd: string; args: any; result: CliRuntimeResult }) => {
+      if (captureFromFile) {
+        const dir = path.dirname(workingOutput)
+        const files = await fs.readdir(dir)
+        const audioFile = files.find((f) => f.startsWith('audio.'))
+        if (!audioFile) throw new Error('yt-dlp did not produce audio output')
+        const resolvedPath = path.join(dir, audioFile)
+        const data = await fs.readFile(resolvedPath)
+        result.stdoutBuffer = data
+      }
+
+      if (cleanup) await cleanup()
+    }
+
+    return { argv, postProcess }
+  },
+  'whisper-cli': async (args, _cwd, stdinValue) => {
+    const input = expectString(args.input || args.arg0 || '-', 'input')
+    const outputDir = expectString(args.outputDir || '-', 'outputDir')
+
+    const modelPath = process.env.WHISPER_MODEL || path.join(os.homedir(), 'models/ggml-base.en.bin')
+    const argv: string[] = []
+    let workingInputPath = input
+    let workingOutputDir = outputDir === '-' ? '' : outputDir
+    let cleanup: (() => Promise<void>) | undefined
+
+    if (input === '-') {
+      if (
+        !stdinValue ||
+        !(typeof stdinValue === 'string' || Buffer.isBuffer(stdinValue) || stdinValue instanceof Uint8Array)
+      ) {
+        throw new Error('stdin audio required when input is "-"')
+      }
+      const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'whisper-in-'))
+      workingInputPath = path.join(tmpDir, 'audio.wav')
+      await fs.writeFile(
+        workingInputPath,
+        Buffer.isBuffer(stdinValue) || stdinValue instanceof Uint8Array
+          ? Buffer.from(stdinValue)
+          : Buffer.from(stdinValue)
+      )
+      cleanup = async () => {
+        await fs.rm(tmpDir, { recursive: true, force: true })
+      }
+    }
+
+    if (!workingOutputDir) {
+      workingOutputDir = await fs.mkdtemp(path.join(os.tmpdir(), 'whisper-out-'))
+      const previousCleanup = cleanup
+      cleanup = async () => {
+        await fs.rm(workingOutputDir, { recursive: true, force: true })
+        if (previousCleanup) await previousCleanup()
+      }
+    }
+
+    const expectedBase = path.basename(workingInputPath, path.extname(workingInputPath))
+    const outputBase = path.join(workingOutputDir || path.dirname(workingInputPath), expectedBase)
+
+    argv.push(workingInputPath, '-m', modelPath, '-ovtt', '-of', outputBase)
+
+    const postProcess = async ({ result }: { cwd: string; args: any; result: CliRuntimeResult }) => {
+      const searchDir = path.dirname(outputBase)
+      const files = await fs.readdir(searchDir)
+      const vttFile =
+        files.find((f) => f.startsWith(expectedBase) && f.endsWith('.vtt')) || files.find((f) => f.endsWith('.vtt'))
+      if (!vttFile) throw new Error('whisper output missing VTT file')
+
+      const vttPath = path.join(searchDir, vttFile)
+      const vtt = await fs.readFile(vttPath)
+      const transcript = vtt
+        .toString('utf8')
+        .split(/\r?\n/)
+        .filter((line) => line && !line.startsWith('WEBVTT') && !line.includes('-->') && !/^\d+$/.test(line.trim()))
+        .map((line) => line.trim())
+        .join('\n')
+
+      // Surface normalized outputs for downstream workflows directly from step output
+      result.stdout = transcript
+      result.stdoutBuffer = vtt
+
+      if (cleanup) await cleanup()
+    }
+
+    return { argv, postProcess, allowStdin: false }
+  },
+  mmdc: (args) => {
+    const input = expectString(args.input || args.arg0, 'input')
+    const output = expectString(args.output || args.arg1 || '-', 'output')
+    const argv: string[] = ['--input', input, '--output', output]
+
+    const postProcess = async ({ result }: { cwd: string; args: any; result: CliRuntimeResult }) => {
+      if (result.stdoutBuffer) result.stdout = result.stdoutBuffer.toString('base64')
+      // Surface normalized file mapping for downstream transform steps
+      if (result.stdoutBuffer) (result as any).files = { 'diagram.png': result.stdoutBuffer }
+    }
+
+    return { argv, postProcess }
+  }
+}
 
 async function ensureSessionDir(sessionDir = DEFAULT_SESSION_DIR) {
-  await fsp.mkdir(sessionDir, { recursive: true })
+  await fs.mkdir(sessionDir, { recursive: true })
   return sessionDir
 }
 
-export function validateCliArgs(args: unknown, step: { command: string; args?: unknown }): boolean {
-  if (!Array.isArray(args)) return false
+export async function runCliArgs(
+  input: CliRuntimeInvocation,
+  opts: { defaultCwd?: string } = {}
+): Promise<CliRuntimeResult> {
+  const spec = COMMAND_BUILDERS[input.step.command]
+  if (!spec) throw new Error(`CLI command not allowed: ${input.step.command}`)
 
-  // Direct invocation of an allowed CLI
-  if (ALLOWED_COMMANDS.has(step.command)) {
-    return (
-      args.length <= MAX_USER_ARGS &&
-      args.every((arg) => typeof arg === 'string' && arg.length > 0 && arg.length <= MAX_ARG_LENGTH)
+  const argsObject = input.args || {}
+  const cwd = input.cwd || opts.defaultCwd || process.cwd()
+  const stdinValue = input.stdinValue
+  if (
+    stdinValue !== undefined &&
+    !(typeof stdinValue === 'string' || Buffer.isBuffer(stdinValue) || stdinValue instanceof Uint8Array)
+  ) {
+    throw new Error('stdinValue must be string or Buffer')
+  }
+
+  const {
+    argv,
+    postProcess,
+    allowStdin = true
+  } = await spec(argsObject, cwd, stdinValue as string | Buffer | Uint8Array | undefined)
+
+  const capture = input.capture || 'text'
+  const wantStdoutBuffer = capture === 'buffer' || capture === 'both'
+  const wantStderrBuffer = capture === 'buffer' || capture === 'both'
+  const wantStdoutText = capture === 'text' || capture === 'both'
+  const wantStderrText = capture === 'text' || capture === 'both'
+
+  const shouldPipeStdin = allowStdin && stdinValue !== undefined
+
+  const child = spawn(input.step.command, argv, {
+    cwd,
+    shell: false,
+    stdio: [
+      shouldPipeStdin ? 'pipe' : 'ignore',
+      wantStdoutBuffer || wantStdoutText ? 'pipe' : 'inherit',
+      wantStderrBuffer || wantStderrText ? 'pipe' : 'inherit'
+    ]
+  })
+
+  if (shouldPipeStdin && child.stdin) {
+    child.stdin.end(
+      Buffer.isBuffer(stdinValue) || stdinValue instanceof Uint8Array ? Buffer.from(stdinValue) : stdinValue
     )
   }
 
-  // Guarded bash that only touches allowed commands and simple primitives
-  if (step.command === 'bash') {
-    const [flag, script] = args as unknown[]
-    if (flag !== '-lc' || typeof script !== 'string') return false
-    const lines = script.split(/\n+/)
+  const stdoutChunks: Buffer[] = []
+  const stderrChunks: Buffer[] = []
+  let stdoutSize = 0
+  let stderrSize = 0
 
-    return lines.every((line) => {
-      const trimmed = line.trim()
-      if (!trimmed || trimmed.startsWith('#')) return true
-      const firstToken = trimmed.split(/\s+/)[0]
-      return ALLOWED_COMMANDS.has(firstToken) || ALLOWED_SHELL_PRIMITIVES.has(firstToken)
+  if (child.stdout) {
+    child.stdout.on('data', (chunk: Buffer) => {
+      if (stdoutSize + chunk.length <= MAX_CAPTURE_BYTES) {
+        stdoutSize += chunk.length
+        stdoutChunks.push(chunk)
+      }
     })
   }
 
-  return false
+  if (child.stderr) {
+    child.stderr.on('data', (chunk: Buffer) => {
+      if (stderrSize + chunk.length <= MAX_CAPTURE_BYTES) {
+        stderrSize += chunk.length
+        stderrChunks.push(chunk)
+      }
+    })
+  }
+
+  const exitCode: number = await new Promise((resolve, reject) => {
+    child.on('error', reject)
+    child.on('close', (code) => resolve(code ?? -1))
+  })
+
+  const result: CliRuntimeResult = { exitCode }
+
+  if (wantStdoutBuffer && stdoutChunks.length) result.stdoutBuffer = Buffer.concat(stdoutChunks)
+  if (wantStderrBuffer && stderrChunks.length) result.stderrBuffer = Buffer.concat(stderrChunks)
+  if (wantStdoutText && stdoutChunks.length) result.stdout = Buffer.concat(stdoutChunks).toString('utf8')
+  if (wantStderrText && stderrChunks.length) result.stderr = Buffer.concat(stderrChunks).toString('utf8')
+
+  if (exitCode !== 0) {
+    throw new Error(
+      `CLI command failed: ${input.step.command} ${argv.join(' ')} exited with code ${exitCode}${
+        result.stderr ? `: ${result.stderr}` : ''
+      }`
+    )
+  }
+
+  if (postProcess) await postProcess({ cwd, args: argsObject, result })
+
+  return result
 }
 
 /* Workflow document for tool selection */

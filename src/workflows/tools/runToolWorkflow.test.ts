@@ -41,7 +41,7 @@ describe('runToolWorkflow', () => {
         rounds: [
           {
             steps: {
-              step1: { parsed: { vttPath: 'out/audio.vtt', transcript: 'hello world' }, raw: 'raw' }
+              step1: { parsed: { files: { 'audio.vtt': Buffer.from('data') }, response: 'hello world' }, raw: 'raw' }
             }
           }
         ]
@@ -49,9 +49,10 @@ describe('runToolWorkflow', () => {
     })
 
     const sessionDir = path.join(TMP_TEST_ROOT, 'sess1')
-    const out = await runToolWorkflow<{ vttPath?: string; transcript?: string }>('transcribe', { url: 'https://a' }, { sessionDir })
+    const out = await runToolWorkflow<{ files?: Record<string, unknown>; response?: string }>('transcribe', { url: 'https://a' }, { sessionDir })
     expect(out.parsed).toBeDefined()
-    expect(out.parsed?.transcript).toBe('hello world')
+    expect(out.parsed?.response).toBe('hello world')
+    expect(out.parsed?.files?.['audio.vtt']).toBeDefined()
     expect(out.sessionDir).toBe(sessionDir)
   })
 

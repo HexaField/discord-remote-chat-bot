@@ -11,13 +11,14 @@ export const diagramWorkflowDocument = {
   sessions: { roles: [{ role: 'orchestrator' as const, nameTemplate: '{{runId}}-diagram' }] },
   parsers: {
     passthrough: { type: 'unknown' as const },
-    diagramResult: {
+    toolResult: {
       type: 'object',
       properties: {
-        pngBase64: { type: 'string' }
+        files: { type: 'object', properties: {}, additionalProperties: true },
+        response: { type: 'string' }
       },
-      required: ['pngBase64'],
-      additionalProperties: false
+      required: ['files'],
+      additionalProperties: true
     }
   },
   roles: {
@@ -28,9 +29,9 @@ export const diagramWorkflowDocument = {
     },
     orchestrator: {
       systemPrompt:
-        'Orchestrate diagram creation: call CLD workflow if a transcript is provided, pipe graph JSON into mermaid CLI and mmdc to render a PNG without intermediate files. Return { pngBase64 } (base64 of the PNG).',
-      parser: 'diagramResult',
-      tools: { read: true, write: true, bash: true }
+        'Orchestrate diagram creation: call CLD workflow if a transcript is provided, convert CLD JSON to Mermaid, and render PNG via mmdc. Return { files, response } with diagram.png content and a short status.',
+      parser: 'toolResult',
+      tools: { read: true, write: true }
     }
   },
   user: {
@@ -38,10 +39,10 @@ export const diagramWorkflowDocument = {
   },
   flow: {
     round: {
-      start: 'maybeClf',
+      start: 'cld',
       steps: [
         {
-          key: 'maybeClf',
+          key: 'cld',
           type: 'workflow',
           workflowId: 'cld.v1',
           input: { instructions: '{{user.transcript}}' },
@@ -50,20 +51,27 @@ export const diagramWorkflowDocument = {
         {
           key: 'mermaid',
           role: 'mermaid' as const,
-          prompt: ['{{steps.maybeClf.raw}}'],
+          prompt: ['{{steps.cld.raw}}'],
           next: 'render'
         },
         {
           key: 'render',
           type: 'cli',
-          command: 'bash',
-          args: [`mmdc --input {{steps.mermaid.raw}} --output - | base64 | tr -d`],
+          command: 'mmdc',
+          argsObject: { input: '-', output: '-' },
+          stdinFrom: '{{steps.mermaid.raw||""}}',
+          capture: 'buffer',
           next: 'emit'
         },
         {
           key: 'emit',
-          role: 'orchestrator' as const,
-          prompt: ['Return { "pngBase64": "{{steps.render.raw}}" }'],
+          type: 'transform',
+          template: {
+            files: {
+              'diagram.png': '$.steps.render.parsed.files["diagram.png"]'
+            },
+            response: 'Diagram generated.'
+          },
           exits: [{ condition: 'always', outcome: 'completed', reason: 'diagram complete' }]
         }
       ],

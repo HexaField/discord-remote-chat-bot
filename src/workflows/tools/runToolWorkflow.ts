@@ -1,7 +1,7 @@
 import { runAgentWorkflow, type AgentWorkflowResult } from '@hexafield/agent-workflow'
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import { chooseToolForMention, TOOLS, validateCliArgs } from '../tools'
+import { chooseToolForMention, runCliArgs, TOOLS } from '../tools'
 import { getToolWorkflowByName } from './index'
 
 export async function runToolWorkflow<TParsed = unknown>(
@@ -33,7 +33,7 @@ export async function runToolWorkflow<TParsed = unknown>(
     workflowSource: 'user',
     workflowLabel: workflowDef.description,
     onStream,
-    validateCliArgs
+    runCliArgs: (input) => runCliArgs(input, { defaultCwd: sessionDir })
   })
 
   const result = await response.result
@@ -83,7 +83,7 @@ export async function runToolWorkflowWithChooser<TParsed = unknown>(chooserOptio
       onProgress: chooserOptions.onProgress
     })
     return { tool, result: res.result, parsed: res.parsed, sessionDir: res.sessionDir }
-  } catch (e) {
+  } catch {
     return { tool }
   }
 }
