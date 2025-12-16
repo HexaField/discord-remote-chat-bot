@@ -14,7 +14,7 @@ import { spawn } from 'node:child_process'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { cldWorkflowDocument } from './workflows/cld.workflow'
+import { cldWorkflowDefinition, cldWorkflowDocument } from './workflows/cld.workflow'
 import { diagramWorkflowDocument } from './workflows/diagram.workflow'
 import { transcribeWorkflowDocument } from './workflows/transcribe.workflow'
 
@@ -48,9 +48,9 @@ export type ToolDef = {
   /** one-sentence condition describing when the tool should be called */
   callWhen: string
   /** brief description */
-  description?: string
-  /** workflow registry key to execute for this tool (optional) */
-  workflow?: string
+  description: string
+  /** workflow registry key to execute for this tool */
+  workflow: string
 }
 
 export const TOOLS: ToolDef[] = [
@@ -361,7 +361,7 @@ export const toolsWorkflowDocument = {
   },
   roles: {
     chooser: {
-      systemPrompt: `Available tools and when to call them:\n{{user.tools}}\nYou are a tool-selection assistant. Given the transcript and the user's message, choose exactly ONE tool from the available list. Only choose a tool if you are VERY CERTAIN it applies to the user request. If you are not very certain, return {"tool":"none"}. Output must be a single JSON object and nothing else, for example: {"tool":"diagram"}`,
+      systemPrompt: `You are a tool-selection assistant. Given the transcript and the user's message, choose exactly ONE tool from the available list. Only choose a tool if you are VERY CERTAIN it applies to the user request. If you are not very certain, return {"tool":"none"}. Output must be a single JSON object and nothing else, for example: {"tool":"diagram"}`,
       parser: 'toolChoice'
     }
   },
@@ -374,7 +374,7 @@ export const toolsWorkflowDocument = {
         {
           key: 'chooser',
           role: 'chooser' as const,
-          prompt: ['{{user.instructions}}'],
+          prompt: ['{{user.instructions}}', 'Available tools and when to use them: {{user.tools}}'],
           exits: [{ condition: 'always', outcome: 'completed', reason: 'Tool selection complete' }]
         }
       ],
@@ -408,7 +408,7 @@ export async function chooseToolForMention(options: {
 
   await ensureSessionDir(sessionDir)
 
-  const toolLines = TOOLS.map((t, i) => `${i + 1}. ${t.name} — ${t.callWhen}`).join('\n')
+  const toolLines = Object.fromEntries(TOOLS.map((t) => [t.name, t.callWhen]))
 
   const referencedText = options.referenced
     ? `${options.referenced.attachments ? `Attachments: ${options.referenced.attachments.join(', ')}` : ''}\n${options.referenced.content ? `Referenced message content: ${options.referenced.content}` : ''}`
@@ -422,7 +422,7 @@ export async function chooseToolForMention(options: {
   }
 
   const response = await runAgentWorkflow(toolsWorkflowDefinition, {
-    user: { instructions: userInstructions, tools: toolLines },
+    user: { instructions: userInstructions, tools: JSON.stringify(toolLines) },
     model,
     sessionDir,
     workflowId: toolsWorkflowDefinition.id,
@@ -512,6 +512,7 @@ export async function runToolWorkflow<TParsed = unknown>(options: {
       user: inputs,
       model: options.model || workflowDef.model,
       sessionDir,
+      workflows: { [cldWorkflowDefinition.id]: cldWorkflowDefinition },
       workflowId: workflowDef.id,
       workflowSource: 'user',
       workflowLabel: workflowDef.description,
@@ -526,7 +527,8 @@ export async function runToolWorkflow<TParsed = unknown>(options: {
     const parsed = lastStep?.parsed as TParsed | undefined
 
     return { tool, result, parsed, sessionDir }
-  } catch {
+  } catch (err) {
+    console.error(`Tool workflow ${workflowKey} failed to execute`, err)
     return { tool }
   }
 }

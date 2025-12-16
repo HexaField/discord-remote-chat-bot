@@ -588,7 +588,7 @@ client.on('messageCreate', async (message) => {
       ? { attachments: Object.keys(referencedContext.attachments || {}), content: referencedContext.content }
       : undefined
 
-    const combined = await runToolWorkflow({
+    const toolOutput = await runToolWorkflow({
       question,
       referenced: referencedForChooser,
       model: ASKQUESTION_CONSTANTS.MODEL,
@@ -597,9 +597,11 @@ client.on('messageCreate', async (message) => {
       onProgress
     })
 
-    if (combined.tool !== 'none') {
+    console.log(toolOutput)
+
+    if (toolOutput.tool !== 'none') {
       try {
-        const parsed = combined.parsed || {}
+        const parsed = toolOutput.parsed || {}
         const filesFromWorkflow = parsed && typeof parsed === 'object' ? (parsed as any).files : undefined
         const attachments: AttachmentBuilder[] = []
 
@@ -627,8 +629,10 @@ client.on('messageCreate', async (message) => {
             content: responseText || 'Here is the result:',
             files: attachments.length ? attachments : undefined
           })
+          return
         } else {
           await reply.edit({ content: 'Tool executed but produced no attachable artifacts.' })
+          return
         }
       } catch (e: any) {
         await reply.edit({ content: `Failed to run tool: ${e?.message ?? e}` })
