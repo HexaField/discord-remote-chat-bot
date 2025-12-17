@@ -77,7 +77,7 @@ export const toolsWorkflowDocument = {
   },
   roles: {
     chooser: {
-      systemPrompt: `Available tools and when to call them:\n{{user.tools}}\nYou are a tool-selection assistant. Given the transcript and the user's message, choose exactly ONE tool from the available list. Only choose a tool if you are VERY CERTAIN it applies to the user request. If you are not very certain, return {"tool":"none"}. Output must be a single JSON object and nothing else, for example: {"tool":"diagram"}`,
+      systemPrompt: `You are a tool-selection assistant. Given the transcript and the user's message, choose exactly ONE tool from the available list. Only choose a tool if you are VERY CERTAIN it applies to the user request. If you are not very certain, return {"tool":"none"}. Output must be a single JSON object and nothing else, for example: {"tool":"diagram"}`,
       parser: 'toolChoice'
     }
   },
@@ -90,7 +90,7 @@ export const toolsWorkflowDocument = {
         {
           key: 'chooser',
           role: 'chooser' as const,
-          prompt: ['{{user.instructions}}'],
+          prompt: ['{{user.instructions}}', `Available tools and when to call them:\n\n{{user.tools}}`],
           exits: [{ condition: 'always', outcome: 'completed', reason: 'Tool selection complete' }]
         }
       ],

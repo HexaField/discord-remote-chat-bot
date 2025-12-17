@@ -540,7 +540,7 @@ client.on('interactionCreate', async (interaction: Interaction) => {
             }
           }
         }
-        followUpTranscription()
+        // followUpTranscription()
       } catch (e: any) {
         await chat.editReply({ content: `Failed to stop recording: ${e?.message ?? e}` })
       }
@@ -651,7 +651,7 @@ client.on('messageCreate', async (message) => {
         try {
           const digest = await generateMeetingDigest(transcriptLines, undefined, async (m) => {
             try {
-              await message.channel.send(`🔄 ${m}`)
+              await reply.edit(`🔄 ${m}`)
             } catch {}
           })
           const formatted = formatMeetingDigest(digest)
