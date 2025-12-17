@@ -417,6 +417,19 @@ const COMMAND_BUILDERS: Record<string, CommandBuilder> = {
 
     return { argv, postProcess, allowStdin: false }
   },
+  npm: (args) => {
+    const payloadValue = args.payload ?? args.arg0
+    if (payloadValue === undefined || payloadValue === null) {
+      throw new Error('Mermaid payload required')
+    }
+
+    const payloadString =
+      typeof payloadValue === 'string' ? payloadValue : JSON.stringify(payloadValue)
+    const payload = expectString(payloadString ?? '', 'payload')
+
+    const argv: string[] = ['run', '--silent', 'build-mermaid', '--', payload]
+    return { argv, allowStdin: false }
+  },
   mmdc: (args) => {
     const input = expectString(args.input || args.arg0, 'input')
     const output = expectString(args.output || args.arg1 || '-', 'output')

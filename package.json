@@ -6,6 +6,7 @@
   "scripts": {
     "start": "tsx src/index.ts",
     "format": "prettier --write .",
+    "build-mermaid": "tsx ./scripts/build-mermaid.ts",
     "postinstall": "npm link @hexafield/agent-workflow",
     "dev": "NODE_ENV=development tsx watch src/index.ts",
     "lint": "tsc --noEmit && eslint . --ext .ts",

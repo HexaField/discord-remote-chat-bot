@@ -1,41 +1,30 @@
 import { workflow } from '@hexafield/agent-workflow'
+import appRootPath from 'app-root-path'
 
 const DEFAULT_MODEL = process.env.TOOLS_MODEL || 'github-copilot/gpt-5-mini'
-
-const passthroughParser = { type: 'unknown' as const }
-
-const toolResultParser = {
-  type: 'object',
-  properties: {
-    files: { type: 'object', properties: {}, additionalProperties: true },
-    response: { type: 'string' }
-  },
-  required: ['files'],
-  additionalProperties: true
-} as const
 
 export const diagramWorkflowDocument = workflow('tools.diagram.v1')
   .description(
     'Create diagram PNG from transcript by extracting CLD data (cld.v1), generating Mermaid markup, and rendering PNG via mmdc.'
   )
   .model(DEFAULT_MODEL)
-  .session('mermaid', '{{runId}}-json-to-mermaid-diagram')
-  .parser('passthrough', passthroughParser)
-  .parser('toolResult', toolResultParser)
-  .role('mermaid', {
-    systemPrompt:
-      'Given CLD JSON, produce Mermaid flowchart (graph LR) showing nodes and signed edges. Use lowercase node ids derived from labels; include edge labels "+" or "-" for predicate. No code fences or commentary. Output Mermaid only.',
-    parser: 'passthrough'
-  })
+  .session('worker', '{{runId}}-diagram-worker')
+  .parser('passthrough', { type: 'unknown' as const })
+  .role('worker', { systemPrompt: 'Diagram worker role (unused for CLI-only flow).', parser: 'passthrough' })
   .user('transcript', { type: 'string', default: '' })
   .round((round) =>
     round
       .start('cld')
       .workflow('cld', 'cld.v1', { input: { instructions: '{{user.transcript}}' }, next: 'mermaid' })
-      .agent('mermaid', 'mermaid', ['{{steps.cld.raw}}'], { next: 'render' })
+      .cli('mermaid', 'npm', {
+        argsObject: { payload: '{{steps.cld.parsed.details.rounds.0.steps.consolidator.raw}}' },
+        cwd: appRootPath.path,
+        capture: 'text',
+        next: 'render'
+      })
       .cli('render', 'mmdc', {
         argsObject: { input: '-', output: '-' },
-        stdinFrom: '{{steps.mermaid.raw}}',
+        stdinFrom: 'steps.mermaid.raw',
         capture: 'buffer',
         next: 'emit'
       })
@@ -43,7 +32,7 @@ export const diagramWorkflowDocument = workflow('tools.diagram.v1')
         'emit',
         {
           files: {
-            'diagram.png': '$.steps.render.parsed.files["diagram.png"]'
+            'diagram.png': '$.steps.render.parsed.stdoutBuffer'
           },
           response: 'Diagram generated.'
         },
