@@ -2,6 +2,7 @@ import {
   AgentStreamEvent,
   AgentWorkflowDefinition,
   extractJson,
+  jsonpathTransform,
   runAgentWorkflow,
   validateWorkflowDefinition,
   WorkflowParserJsonOutput,
@@ -9,7 +10,6 @@ import {
   type CliRuntimeInvocation,
   type CliRuntimeResult
 } from '@hexafield/agent-workflow'
-import jsonpathTransform from '@hexafield/jsonpath-object-transform'
 import appRootPath from 'app-root-path'
 import { spawn } from 'node:child_process'
 import fs from 'node:fs/promises'
