@@ -583,14 +583,10 @@ client.on('messageCreate', async (message) => {
     }
     if (!contextParts.length) contextParts.push(question)
     const fullContext = contextParts.join('\n\n')
-    // Use the centralized chooser+executor to reduce bespoke glue per-tool
-    const referencedForChooser = referencedContext
-      ? { attachments: Object.keys(referencedContext.attachments || {}), content: referencedContext.content }
-      : undefined
 
     const toolOutput = await runToolWorkflow({
       question,
-      referenced: referencedForChooser,
+      referenced: contextParts,
       model: ASKQUESTION_CONSTANTS.MODEL,
       onProgress
     })

@@ -10,6 +10,7 @@ import {
   type CliRuntimeInvocation,
   type CliRuntimeResult
 } from '@hexafield/agent-workflow'
+import { renderAsync } from '@resvg/resvg-js'
 import appRootPath from 'app-root-path'
 import { spawn } from 'node:child_process'
 import fs from 'node:fs/promises'
@@ -104,6 +105,9 @@ const DEFAULT_MODEL = process.env.TOOLS_MODEL || 'github-copilot/gpt-5-mini'
 const DEFAULT_SESSION_DIR = path.resolve(appRootPath.path, '.tmp', 'tools-sessions')
 const MAX_ARG_LENGTH = 20000
 const MAX_CAPTURE_BYTES = 25 * 1024 * 1024
+
+const isPngBuffer = (buf?: Buffer) =>
+  !!buf && buf.length >= 8 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47
 
 const pruneEmpty = (value: unknown): any => {
   if (value === null || value === undefined) return undefined
@@ -214,7 +218,7 @@ const ensureToolInputDefaults = (
 export async function buildToolInputsForContext(
   tool: string,
   question: string,
-  referenced?: { attachments?: string[]; content?: string },
+  referenced?: string[],
   opts: { model?: string; sessionDir?: string; onProgress?: (m: string) => void; toolDef?: ToolDef } = {}
 ): Promise<{ inputs: Record<string, unknown>; transform?: Record<string, unknown>; target?: Record<string, unknown> }> {
   const targetShape = TOOL_INPUT_TARGETS[tool]?.target
@@ -423,25 +427,73 @@ const COMMAND_BUILDERS: Record<string, CommandBuilder> = {
       throw new Error('Mermaid payload required')
     }
 
-    const payloadString =
-      typeof payloadValue === 'string' ? payloadValue : JSON.stringify(payloadValue)
+    const payloadString = typeof payloadValue === 'string' ? payloadValue : JSON.stringify(payloadValue)
     const payload = expectString(payloadString ?? '', 'payload')
 
     const argv: string[] = ['run', '--silent', 'build-mermaid', '--', payload]
     return { argv, allowStdin: false }
   },
-  mmdc: (args) => {
+  mmdc: async (args, _cwd, stdinValue) => {
     const input = expectString(args.input || args.arg0, 'input')
     const output = expectString(args.output || args.arg1 || '-', 'output')
-    const argv: string[] = ['--input', input, '--output', output]
+    const outputIsStdout = output === '-'
+    const tmpOutput = outputIsStdout ? path.join(os.tmpdir(), `mmdc-${Date.now()}.png`) : output
 
-    const postProcess = async ({ result }: { cwd: string; args: any; result: CliRuntimeResult }) => {
-      if (result.stdoutBuffer) result.stdout = result.stdoutBuffer.toString('base64')
-      // Surface normalized file mapping for downstream transform steps
-      if (result.stdoutBuffer) (result as any).files = { 'diagram.png': result.stdoutBuffer }
+    let workingInput = input
+    let cleanup: (() => Promise<void>) | undefined
+
+    if (input === '-') {
+      if (!stdinValue || !(typeof stdinValue === 'string' || Buffer.isBuffer(stdinValue))) {
+        throw new Error('mmdc requires mermaid stdin when input is "-"')
+      }
+      const tmpInput = path.join(os.tmpdir(), `mmdc-${Date.now()}.mmd`)
+      await fs.writeFile(tmpInput, stdinValue)
+      workingInput = tmpInput
+      cleanup = async () => {
+        await fs.rm(tmpInput, { force: true })
+      }
     }
 
-    return { argv, postProcess }
+    const argv: string[] = ['--input', workingInput, '--output', tmpOutput, '--outputFormat', 'png']
+
+    const postProcess = async ({ result }: { cwd: string; args: any; result: CliRuntimeResult }) => {
+      // Prefer captured stdout buffer when provided
+      let pngBuffer = result.stdoutBuffer
+
+      // If stdout was redirected to a temp file, prefer the file output regardless of stdout chatter
+      if (outputIsStdout) {
+        try {
+          const fileBuf = await fs.readFile(tmpOutput)
+          pngBuffer = fileBuf
+        } catch (err) {
+          // fall through; will error below if no usable buffer
+          pngBuffer = pngBuffer ?? undefined
+        } finally {
+          await fs.rm(tmpOutput, { force: true }).catch(() => {})
+        }
+      }
+
+      if (pngBuffer) {
+        if (!isPngBuffer(pngBuffer)) {
+          const svgText = pngBuffer.toString('utf8')
+          if (svgText.trim().startsWith('<svg')) {
+            const rendered = await renderAsync(svgText)
+            pngBuffer = Buffer.from(rendered.asPng())
+          }
+        }
+        if (!isPngBuffer(pngBuffer)) {
+          const preview = pngBuffer.subarray(0, 64).toString('hex')
+          throw new Error(`mmdc did not produce a valid PNG (exit=${result.exitCode ?? 'unknown'}, head=${preview})`)
+        }
+        result.stdout = pngBuffer.toString('base64')
+        result.stdoutBuffer = pngBuffer
+        ;(result as any).files = { 'diagram.png': pngBuffer }
+      }
+
+      if (cleanup) await cleanup()
+    }
+
+    return { argv, postProcess, allowStdin: false }
   }
 }
 
@@ -603,7 +655,7 @@ const extractToolsOutput = (result: ToolsWorkflowResult): ToolsParserOutput | un
 
 export async function chooseToolForMention(options: {
   question: string
-  referenced?: { attachments?: string[]; content?: string }
+  referenced?: string[]
   sessionId?: string
   sessionDir?: string
   model?: string
@@ -617,8 +669,6 @@ export async function chooseToolForMention(options: {
   const toolLines = Object.fromEntries(TOOLS.map((t) => [t.name, t.callWhen]))
 
   const referencedText = options.referenced
-    ? `${options.referenced.attachments ? `Attachments: ${options.referenced.attachments.join(', ')}` : ''}\n${options.referenced.content ? `Referenced message content: ${options.referenced.content}` : ''}`
-    : ''
 
   const userInstructions = ['Context: ' + referencedText, 'Question: ' + options.question].join('\n')
 
@@ -670,12 +720,11 @@ export async function chooseToolForMention(options: {
 
 export async function runToolWorkflow<TParsed = unknown>(options: {
   question: string
-  referenced?: { attachments?: string[]; content?: string }
+  referenced?: string[]
   model?: string
   sessionDir?: string
   onProgress?: (m: string) => void
 }): Promise<{ tool: string; result?: any; parsed?: TParsed; sessionDir?: string }> {
-  console.log({ question: options.question, referenced: options.referenced })
   const chooser = await chooseToolForMention({
     question: options.question,
     referenced: options.referenced,
