@@ -1,126 +1,120 @@
 import {
   AgentStreamEvent,
-  AgentWorkflowDefinition,
-  validateWorkflowDefinition,
   runAgentWorkflow,
+  workflow,
   WorkflowParserJsonOutput,
   type AgentWorkflowResult
 } from '@hexafield/agent-workflow'
 
 import os from 'node:os'
 
-export const meetingDigestWorkflowDocument = {
-  $schema: 'https://hyperagent.dev/schemas/agent-workflow.json',
-  id: 'meeting-digest.v1',
-  description: 'Summarise meetings into insights, action items, decisions, and open questions.',
-  model: 'github-copilot/gpt-5-mini',
-  sessions: {
-    roles: [
-      { role: 'insight' as const, nameTemplate: '{{runId}}-digest-insight' },
-      { role: 'actions' as const, nameTemplate: '{{runId}}-digest-actions' },
-      { role: 'decisions' as const, nameTemplate: '{{runId}}-digest-decisions' },
-      { role: 'questions' as const, nameTemplate: '{{runId}}-digest-questions' },
-      { role: 'integrator' as const, nameTemplate: '{{runId}}-digest-integrator' }
-    ]
-  },
-  parsers: {
-    passthrough: { type: 'unknown' as const },
-    meetingDigest: {
-      type: 'object',
-      properties: {
-        insights: {
-          type: 'array',
-          items: {
-            type: 'object',
-            properties: {
-              summary: { type: 'string' },
-              evidence: { type: 'array', items: { type: 'string' }, default: [] }
-            },
-            required: ['summary'],
-            additionalProperties: false
-          },
-          default: []
+const passthroughParser = { type: 'unknown' as const }
+
+const meetingDigestParser = {
+  type: 'object',
+  properties: {
+    insights: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          summary: { type: 'string' },
+          evidence: { type: 'array', items: { type: 'string' }, default: [] }
         },
-        actionItems: {
-          type: 'array',
-          items: {
-            type: 'object',
-            properties: {
-              task: { type: 'string' },
-              owner: { type: 'string', default: '' },
-              due: { type: 'string', default: '' },
-              status: { type: 'string', enum: ['new', 'in-progress', 'blocked', 'done'], default: 'new' },
-              source: { type: 'string', default: '' }
-            },
-            required: ['task'],
-            additionalProperties: false
-          },
-          default: []
-        },
-        decisions: {
-          type: 'array',
-          items: {
-            type: 'object',
-            properties: {
-              decision: { type: 'string' },
-              rationale: { type: 'string', default: '' },
-              source: { type: 'string', default: '' }
-            },
-            required: ['decision'],
-            additionalProperties: false
-          },
-          default: []
-        },
-        openQuestions: {
-          type: 'array',
-          items: {
-            type: 'object',
-            properties: {
-              question: { type: 'string' },
-              owner: { type: 'string', default: '' },
-              source: { type: 'string', default: '' }
-            },
-            required: ['question'],
-            additionalProperties: false
-          },
-          default: []
-        }
+        required: ['summary'],
+        additionalProperties: false
       },
-      required: ['insights', 'actionItems', 'decisions', 'openQuestions'],
-      additionalProperties: false
+      default: []
+    },
+    actionItems: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          task: { type: 'string' },
+          owner: { type: 'string', default: '' },
+          due: { type: 'string', default: '' },
+          status: { type: 'string', enum: ['new', 'in-progress', 'blocked', 'done'], default: 'new' },
+          source: { type: 'string', default: '' }
+        },
+        required: ['task'],
+        additionalProperties: false
+      },
+      default: []
+    },
+    decisions: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          decision: { type: 'string' },
+          rationale: { type: 'string', default: '' },
+          source: { type: 'string', default: '' }
+        },
+        required: ['decision'],
+        additionalProperties: false
+      },
+      default: []
+    },
+    openQuestions: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          question: { type: 'string' },
+          owner: { type: 'string', default: '' },
+          source: { type: 'string', default: '' }
+        },
+        required: ['question'],
+        additionalProperties: false
+      },
+      default: []
     }
   },
-  roles: {
-    insight: {
-      systemPrompt: `Extract concise, non-overlapping insights from the meeting transcript.
+  required: ['insights', 'actionItems', 'decisions', 'openQuestions'],
+  additionalProperties: false
+} as const
+
+export const meetingDigestWorkflowDocument = workflow('meeting-digest.v1')
+  .description('Summarise meetings into insights, action items, decisions, and open questions.')
+  .model('github-copilot/gpt-5-mini')
+  .session('insight', '{{runId}}-digest-insight')
+  .session('actions', '{{runId}}-digest-actions')
+  .session('decisions', '{{runId}}-digest-decisions')
+  .session('questions', '{{runId}}-digest-questions')
+  .session('integrator', '{{runId}}-digest-integrator')
+  .parser('passthrough', passthroughParser)
+  .parser('meetingDigest', meetingDigestParser)
+  .role('insight', {
+    systemPrompt: `Extract concise, non-overlapping insights from the meeting transcript.
 - Insights are durable findings, observations, or agreements about the situation.
 - Stay faithful to the text; avoid speculation or advice.
 Return strict JSON: {"insights": [{"summary": "...", "evidence": ["..."]}]}. Use evidence spans from the transcript. Empty array if none.`,
-      parser: 'passthrough'
-    },
-    actions: {
-      systemPrompt: `List concrete action items or new tasks from the meeting.
+    parser: 'passthrough'
+  })
+  .role('actions', {
+    systemPrompt: `List concrete action items or new tasks from the meeting.
 - Each item should include task description, owner if stated, and due date if stated.
 - Avoid restating insights or decisions here.
 Return strict JSON: {"actionItems": [{"task": "...", "owner": "", "due": "", "status": "new", "source": "..."}]}. Empty array if none.`,
-      parser: 'passthrough'
-    },
-    decisions: {
-      systemPrompt: `Capture decisions made in the meeting.
+    parser: 'passthrough'
+  })
+  .role('decisions', {
+    systemPrompt: `Capture decisions made in the meeting.
 - A decision is a resolved choice with commitment.
 - Include brief rationale if present.
 Return strict JSON: {"decisions": [{"decision": "...", "rationale": "", "source": "..."}]}. Empty array if none.`,
-      parser: 'passthrough'
-    },
-    questions: {
-      systemPrompt: `List open questions that remain unresolved.
+    parser: 'passthrough'
+  })
+  .role('questions', {
+    systemPrompt: `List open questions that remain unresolved.
 - Include who raised or owns the question if known.
 - Exclude rhetorical questions or ones already answered.
 Return strict JSON: {"openQuestions": [{"question": "...", "owner": "", "source": "..."}]}. Empty array if none.`,
-      parser: 'passthrough'
-    },
-    integrator: {
-      systemPrompt: `You are a meeting synthesiser.
+    parser: 'passthrough'
+  })
+  .role('integrator', {
+    systemPrompt: `You are a meeting synthesiser.
 Merge prior step outputs into one JSON object with four arrays: insights, actionItems, decisions, openQuestions.
 - Keep text concise (max 2 sentences per entry).
 - Preserve evidence/source snippets where provided.
@@ -131,55 +125,47 @@ Output strict JSON only, matching schema:
  "decisions": [{"decision": "...", "rationale": "", "source": "..."}],
  "openQuestions": [{"question": "...", "owner": "", "source": "..."}]}
 Use empty arrays when a category is missing. No markdown or commentary.`,
-      parser: 'meetingDigest'
-    }
-  },
-  state: {
-    initial: {}
-  },
-  user: { instructions: { type: 'string', default: '' } },
-  flow: {
-    round: {
-      start: 'insight',
-      steps: [
+    parser: 'meetingDigest'
+  })
+  .user('instructions', { type: 'string', default: '' })
+  .round((round) =>
+    round
+      .start('insight')
+      .agent('insight', 'insight', ['Meeting transcript or notes:\n{{user.instructions}}'], { next: 'actions' })
+      .agent(
+        'actions',
+        'actions',
+        ['Meeting transcript:\n{{user.instructions}}', 'Reference insights if helpful:\n{{steps.insight.raw}}'],
+        { next: 'decisions' }
+      )
+      .agent(
+        'decisions',
+        'decisions',
+        ['Meeting transcript:\n{{user.instructions}}', 'Action items noted earlier:\n{{steps.actions.raw}}'],
         {
-          key: 'insight',
-          role: 'insight' as const,
-          next: 'actions',
-          prompt: ['Meeting transcript or notes:\n{{user.instructions}}']
-        },
+          next: 'questions'
+        }
+      )
+      .agent(
+        'questions',
+        'questions',
+        ['Meeting transcript:\n{{user.instructions}}', 'Decisions noted earlier:\n{{steps.decisions.raw}}'],
         {
-          key: 'actions',
-          role: 'actions' as const,
-          next: 'decisions',
-          prompt: [
-            'Meeting transcript:\n{{user.instructions}}',
-            'Reference insights if helpful:\n{{steps.insight.raw}}'
-          ]
-        },
+          next: 'integrator'
+        }
+      )
+      .agent(
+        'integrator',
+        'integrator',
+        [
+          'Meeting transcript:\n{{user.instructions}}',
+          'Insights (JSON):\n{{steps.insight.raw}}',
+          'Action items (JSON):\n{{steps.actions.raw}}',
+          'Decisions (JSON):\n{{steps.decisions.raw}}',
+          'Open questions (JSON):\n{{steps.questions.raw}}',
+          'Produce the final merged JSON object with four arrays and no extra keys.'
+        ],
         {
-          key: 'decisions',
-          role: 'decisions' as const,
-          next: 'questions',
-          prompt: ['Meeting transcript:\n{{user.instructions}}', 'Action items noted earlier:\n{{steps.actions.raw}}']
-        },
-        {
-          key: 'questions',
-          role: 'questions' as const,
-          next: 'integrator',
-          prompt: ['Meeting transcript:\n{{user.instructions}}', 'Decisions noted earlier:\n{{steps.decisions.raw}}']
-        },
-        {
-          key: 'integrator',
-          role: 'integrator' as const,
-          prompt: [
-            'Meeting transcript:\n{{user.instructions}}',
-            'Insights (JSON):\n{{steps.insight.raw}}',
-            'Action items (JSON):\n{{steps.actions.raw}}',
-            'Decisions (JSON):\n{{steps.decisions.raw}}',
-            'Open questions (JSON):\n{{steps.questions.raw}}',
-            'Produce the final merged JSON object with four arrays and no extra keys.'
-          ],
           exits: [
             {
               condition: 'always',
@@ -188,22 +174,16 @@ Use empty arrays when a category is missing. No markdown or commentary.`,
             }
           ]
         }
-      ],
-      maxRounds: 1,
-      defaultOutcome: {
-        outcome: 'completed',
-        reason: 'Meeting digest pipeline executed'
-      }
-    }
-  }
-} as const satisfies AgentWorkflowDefinition
+      )
+      .maxRounds(1)
+      .defaultOutcome('completed', 'Meeting digest pipeline executed')
+  )
+  .build()
 
 export type MeetingDigestWorkflowDefinition = typeof meetingDigestWorkflowDocument
-export type MeetingDigestParserOutput = WorkflowParserJsonOutput<
-  (typeof meetingDigestWorkflowDocument)['parsers']['meetingDigest']
->
+export type MeetingDigestParserOutput = WorkflowParserJsonOutput<typeof meetingDigestParser>
 
-export const meetingDigestWorkflowDefinition = validateWorkflowDefinition(meetingDigestWorkflowDocument)
+export const meetingDigestWorkflowDefinition = meetingDigestWorkflowDocument
 export type MeetingDigestWorkflowResult = AgentWorkflowResult<MeetingDigestWorkflowDefinition>
 
 const extractMeetingDigest = (result: MeetingDigestWorkflowResult): MeetingDigestParserOutput | undefined => {
@@ -212,7 +192,7 @@ const extractMeetingDigest = (result: MeetingDigestWorkflowResult): MeetingDiges
 }
 
 export async function generateMeetingDigest(
-  transcriptLines: string[],
+  transcript: string,
   userPrompt: string | undefined,
   onProgress?: (msg: string) => void,
   model = 'github-copilot/gpt-5-mini',
@@ -242,7 +222,7 @@ export async function generateMeetingDigest(
     }
   }
 
-  let userInstructions = transcriptLines.join('\n')
+  let userInstructions = transcript
 
   if (userPrompt) {
     userInstructions = `User prompt: ${userPrompt}\n\nSource text:\n${userInstructions}`

@@ -6,6 +6,7 @@
   "scripts": {
     "start": "tsx src/index.ts",
     "format": "prettier --write .",
+    "build-mermaid": "tsx ./scripts/build-mermaid.ts",
     "postinstall": "npm link @hexafield/agent-workflow",
     "dev": "NODE_ENV=development tsx watch src/index.ts",
     "lint": "tsc --noEmit && eslint . --ext .ts",
@@ -19,6 +20,7 @@
   "dependencies": {
     "@discordjs/opus": "^0.10.0",
     "@discordjs/voice": "^0.19.0",
+    "@hexafield/jsonpath-object-transform": "^2.0.0",
     "@mermaid-js/mermaid-cli": "^11.12.0",
     "@resvg/resvg-js": "^2.6.2",
     "@snazzah/davey": "^0.1.7",
@@ -29,6 +31,7 @@
     "d3": "^7.9.0",
     "discord.js": "^14.13.0",
     "dotenv": "^16.3.1",
+    "dotenv-flow": "^4.1.0",
     "express": "^4.21.2",
     "msgpackr": "^1.11.5",
     "multer": "^2.0.2",

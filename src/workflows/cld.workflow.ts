@@ -1,99 +1,93 @@
 import {
   AgentStreamEvent,
-  AgentWorkflowDefinition,
-  validateWorkflowDefinition,
   runAgentWorkflow,
+  workflow,
   WorkflowParserJsonOutput,
   type AgentWorkflowResult
 } from '@hexafield/agent-workflow'
 
 import os from 'node:os'
 
-export const cldWorkflowDocument = {
-  $schema: 'https://hyperagent.dev/schemas/agent-workflow.json',
-  id: 'cld.v1',
-  description: 'Extract causal relationships and node classifications for causal loop diagrams.',
-  model: 'github-copilot/gpt-5-mini',
-  sessions: {
-    roles: [
-      { role: 'summariser' as const, nameTemplate: '{{runId}}-cld-summariser' },
-      { role: 'extractor' as const, nameTemplate: '{{runId}}-cld-extractor' },
-      { role: 'classifier' as const, nameTemplate: '{{runId}}-cld-classifier' },
-      { role: 'relator' as const, nameTemplate: '{{runId}}-cld-relator' },
-      { role: 'consolidator' as const, nameTemplate: '{{runId}}-cld-consolidator' }
-    ]
-  },
-  parsers: {
-    passthrough: { type: 'unknown' as const },
-    cld: {
-      type: 'object',
-      properties: {
-        nodes: {
-          type: 'array',
-          items: {
-            type: 'object',
-            properties: {
-              label: { type: 'string' },
-              type: { type: 'string', enum: ['driver', 'obstacle', 'actor', 'other'] }
-            },
-            required: ['label', 'type'],
-            additionalProperties: false
-          },
-          default: []
+const passthroughParser = { type: 'unknown' as const }
+
+const cldParser = {
+  type: 'object',
+  properties: {
+    nodes: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          label: { type: 'string' },
+          type: { type: 'string', enum: ['driver', 'obstacle', 'actor', 'other'] }
         },
-        relationships: {
-          type: 'array',
-          items: {
-            type: 'object',
-            properties: {
-              subject: { type: 'string' },
-              object: { type: 'string' },
-              predicate: { type: 'string', enum: ['positive', 'negative'] },
-              reasoning: { type: 'string' },
-              relevant: { type: 'array', items: { type: 'string' }, default: [] },
-              createdAt: { type: 'string' }
-            },
-            required: ['subject', 'object', 'predicate', 'reasoning', 'relevant', 'createdAt'],
-            additionalProperties: false
-          },
-          default: []
-        }
+        required: ['label', 'type'],
+        additionalProperties: false
       },
-      required: ['nodes', 'relationships'],
-      additionalProperties: false
+      default: []
+    },
+    relationships: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          subject: { type: 'string' },
+          object: { type: 'string' },
+          predicate: { type: 'string', enum: ['positive', 'negative'] },
+          reasoning: { type: 'string' },
+          relevant: { type: 'array', items: { type: 'string' }, default: [] },
+          createdAt: { type: 'string' }
+        },
+        required: ['subject', 'object', 'predicate', 'reasoning', 'relevant', 'createdAt'],
+        additionalProperties: false
+      },
+      default: []
     }
   },
-  user: { instructions: { type: 'string', default: '' } },
-  roles: {
-    summariser: {
-      systemPrompt: `Summarise the general topic(s) of the provided text in 2-4 short sentences.
+  required: ['nodes', 'relationships'],
+  additionalProperties: false
+} as const
+
+export const cldWorkflowDocument = workflow('cld.v1')
+  .description('Extract causal relationships and node classifications for causal loop diagrams.')
+  .model('github-copilot/gpt-5-mini')
+  .session('summariser', '{{runId}}-cld-summariser')
+  .session('extractor', '{{runId}}-cld-extractor')
+  .session('classifier', '{{runId}}-cld-classifier')
+  .session('relator', '{{runId}}-cld-relator')
+  .session('consolidator', '{{runId}}-cld-consolidator')
+  .parser('passthrough', passthroughParser)
+  .parser('cld', cldParser)
+  .user('instructions', { type: 'string', default: '' })
+  .role('summariser', {
+    systemPrompt: `Summarise the general topic(s) of the provided text in 2-4 short sentences.
 - Stay strictly within what the text asserts; no speculation or extrapolation.
 - Capture the main subject areas (themes) using concise language.
 - Keep the summary scoped to ideas that recur or anchor the text.
 Return strict JSON: {"topics": ["..."]} with lowercase entries and no commentary.`,
-      parser: 'passthrough'
-    },
-    extractor: {
-      systemPrompt: `From the text, extract a rich set of causal statements the text actually asserts.
+    parser: 'passthrough'
+  })
+  .role('extractor', {
+    systemPrompt: `From the text, extract a rich set of causal statements the text actually asserts.
 Use the provided topics as a relevance filter; skip statements that do not clearly relate to those topics.
 - A causal statement should indicate how one factor influences another.
 - Exclude speculation, jokes, hypotheticals, opinions about unknowns, or non-causal descriptions.
 - Keep statements concise and anchored to the exact meaning in the text span.
 Return strict JSON: {"causalStatements": [{"section": "title", "statement": "..."}]} preserving order.`,
-      parser: 'passthrough'
-    },
-    classifier: {
-      systemPrompt: `Classify variables involved in the causal statements into one of: driver, obstacle, actor, other.
+    parser: 'passthrough'
+  })
+  .role('classifier', {
+    systemPrompt: `Classify variables involved in the causal statements into one of: driver, obstacle, actor, other.
 - driver: external positive influences, generators, attractors, or outcomes/goals.
 - obstacle: barriers or friction that steer away from goals.
 - actor: people, agents, or processes operating in/through the system.
 - other: none of the above.
 - Keep variable names concise (max 2 words), neutral tone, lowercase; minimize distinct variables by merging near-duplicates.
 Return strict JSON: {"nodes": [{"label": "...", "type": "driver|obstacle|actor|other"}]} with unique labels.`,
-      parser: 'passthrough'
-    },
-    relator: {
-      systemPrompt: `Generate relationships linking the causal statements.
+    parser: 'passthrough'
+  })
+  .role('relator', {
+    systemPrompt: `Generate relationships linking the causal statements.
 - Map each causal statement to subject (cause) and object (effect) variables.
 - predicate: "positive" if subject increases object; "negative" if subject decreases object.
 - reasoning: brief rationale grounded in the statement.
@@ -101,10 +95,10 @@ Return strict JSON: {"nodes": [{"label": "...", "type": "driver|obstacle|actor|o
 - subject/object must match the chosen variable labels (lowercase) from earlier steps.
 Only include relationships that align with the provided topics.
 Return strict JSON: {"relationships": [{"subject": "...", "predicate": "positive|negative", "object": "...", "reasoning": "...", "relevant": ["..."]}]}. Subject/object lowercase variable names only.`,
-      parser: 'passthrough'
-    },
-    consolidator: {
-      systemPrompt: `You are a System Dynamics Professional Modeler.
+    parser: 'passthrough'
+  })
+  .role('consolidator', {
+    systemPrompt: `You are a System Dynamics Professional Modeler.
     Users will give text, and upstream steps have produced topics, causal statements, node types, and relationships. Consolidate into a causal loop diagram dataset where all variables form a single connected graph.
 
 Tasks:
@@ -119,63 +113,56 @@ Output strict JSON with shape: {"nodes":[{label,type}], "relationships":[{subjec
 - createdAt: ISO 8601 timestamp set at response time
 - type: driver | obstacle | actor | other
 No markdown fences or commentary.`,
-      parser: 'cld'
-    }
-  },
-  state: {
-    initial: {}
-  },
-  flow: {
-    round: {
-      start: 'summariser',
-      steps: [
+    parser: 'cld'
+  })
+  .round((round) =>
+    round
+      .start('summariser')
+      .agent('summariser', 'summariser', ['Source text (treat as transcript):\n{{user.instructions}}'], {
+        next: 'extractor'
+      })
+      .agent(
+        'extractor',
+        'extractor',
+        [
+          'General topics (JSON):\n{{steps.summariser.raw}}',
+          'Source text:\n{{user.instructions}}',
+          'Extract asserted causal statements only; exclude speculation, jokes, or hypotheticals. Keep only statements tied to the provided topics.'
+        ],
+        { next: 'classifier' }
+      )
+      .agent(
+        'classifier',
+        'classifier',
+        [
+          'Causal statements (JSON):\n{{steps.extractor.raw}}',
+          'Classify variables into driver | obstacle | actor | other with concise lowercase labels.'
+        ],
+        { next: 'relator' }
+      )
+      .agent(
+        'relator',
+        'relator',
+        [
+          'Causal statements (JSON):\n{{steps.extractor.raw}}',
+          'Node types (JSON):\n{{steps.classifier.raw}}',
+          'Topics (JSON):\n{{steps.summariser.raw}}',
+          'Generate directional relationships with predicate positive/negative and supporting spans.'
+        ],
+        { next: 'consolidator' }
+      )
+      .agent(
+        'consolidator',
+        'consolidator',
+        [
+          'Source text:\n{{user.instructions}}',
+          'Topics (JSON):\n{{steps.summariser.raw}}',
+          'Causal statements (JSON):\n{{steps.extractor.raw}}',
+          'Node types (JSON):\n{{steps.classifier.raw}}',
+          'Relationships (JSON):\n{{steps.relator.raw}}',
+          'Consolidate into connected nodes and relationships. Return strict JSON only.'
+        ],
         {
-          key: 'summariser',
-          role: 'summariser' as const,
-          next: 'extractor',
-          prompt: ['Source text (treat as transcript):\n{{user.instructions}}']
-        },
-        {
-          key: 'extractor',
-          role: 'extractor' as const,
-          next: 'classifier',
-          prompt: [
-            'General topics (JSON):\n{{steps.summariser.raw}}',
-            'Source text:\n{{user.instructions}}',
-            'Extract asserted causal statements only; exclude speculation, jokes, or hypotheticals. Keep only statements tied to the provided topics.'
-          ]
-        },
-        {
-          key: 'classifier',
-          role: 'classifier' as const,
-          next: 'relator',
-          prompt: [
-            'Causal statements (JSON):\n{{steps.extractor.raw}}',
-            'Classify variables into driver | obstacle | actor | other with concise lowercase labels.'
-          ]
-        },
-        {
-          key: 'relator',
-          role: 'relator' as const,
-          next: 'consolidator',
-          prompt: [
-            'Causal statements (JSON):\n{{steps.extractor.raw}}',
-            'Node types (JSON):\n{{steps.classifier.raw}}',
-            'Topics (JSON):\n{{steps.summariser.raw}}',
-            'Generate directional relationships with predicate positive/negative and supporting spans.'
-          ]
-        },
-        {
-          key: 'consolidator',
-          role: 'consolidator' as const,
-          prompt: [
-            'Source text:\n{{user.instructions}}',
-            'Topics (JSON):\n{{steps.summariser.raw}}',
-            'Causal statements (JSON):\n{{steps.extractor.raw}}',
-            'Node types (JSON):\n{{steps.classifier.raw}}',
-            'Relationships (JSON):\n{{steps.relator.raw}}',
-            'Consolidate into connected nodes and relationships. Return strict JSON only.'
-          ],
           exits: [
             {
               condition: 'always',
@@ -184,20 +171,16 @@ No markdown fences or commentary.`,
             }
           ]
         }
-      ],
-      maxRounds: 1,
-      defaultOutcome: {
-        outcome: 'completed',
-        reason: 'Causal extraction pipeline executed'
-      }
-    }
-  }
-} as const satisfies AgentWorkflowDefinition
+      )
+      .maxRounds(1)
+      .defaultOutcome('completed', 'Causal extraction pipeline executed')
+  )
+  .build()
 
 export type CldWorkflowDefinition = typeof cldWorkflowDocument
-export type CldParserOutput = WorkflowParserJsonOutput<(typeof cldWorkflowDocument)['parsers']['cld']>
+export type CldParserOutput = WorkflowParserJsonOutput<typeof cldParser>
 
-export const cldWorkflowDefinition = validateWorkflowDefinition(cldWorkflowDocument)
+export const cldWorkflowDefinition = cldWorkflowDocument
 export type CldWorkflowResult = AgentWorkflowResult<CldWorkflowDefinition>
 
 const extractCldOutput = (result: CldWorkflowResult): CldParserOutput | undefined => {
