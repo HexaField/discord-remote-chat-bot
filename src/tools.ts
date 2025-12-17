@@ -15,6 +15,7 @@ import { spawn } from 'node:child_process'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { vttToTranscript } from './utils/vtt'
 import { cldWorkflowDefinition, cldWorkflowDocument } from './workflows/cld.workflow'
 import { diagramWorkflowDocument } from './workflows/diagram.workflow'
 import { meetingDigestWorkflowDocument } from './workflows/meetingDigest.workflow'
@@ -98,6 +99,8 @@ export const TOOLS: ToolDef[] = [
 
 export const TOOL_NAMES = TOOLS.map((t) => t.name)
 
+const formatToolGuide = () => TOOLS.map((t) => `- ${t.name}: ${t.callWhen} Description: ${t.description}`).join('\n')
+
 const DEFAULT_MODEL = process.env.TOOLS_MODEL || 'github-copilot/gpt-5-mini'
 const DEFAULT_SESSION_DIR = path.resolve(appRootPath.path, '.tmp', 'tools-sessions')
 const MAX_ARG_LENGTH = 20000
@@ -105,6 +108,31 @@ const MAX_CAPTURE_BYTES = 25 * 1024 * 1024
 
 const isPngBuffer = (buf?: Buffer) =>
   !!buf && buf.length >= 8 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47
+
+type CleanupFn = () => Promise<void>
+
+const combineCleanups =
+  (...cleanups: Array<CleanupFn | undefined>): CleanupFn =>
+  async () => {
+    for (const fn of cleanups) {
+      if (fn) await fn()
+    }
+  }
+
+const createTmpDir = async (prefix: string) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), prefix))
+  const cleanup: CleanupFn = async () => {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+  return { dir, cleanup }
+}
+
+const writeTmpFile = async (prefix: string, ext: string, content: string | Buffer | Uint8Array) => {
+  const { dir, cleanup } = await createTmpDir(prefix)
+  const filePath = path.join(dir, `tmp${ext}`)
+  await fs.writeFile(filePath, content)
+  return { filePath, cleanup }
+}
 
 const pruneEmpty = (value: unknown): any => {
   if (value === null || value === undefined) return undefined
@@ -184,15 +212,13 @@ const COMMAND_BUILDERS: Record<string, CommandBuilder> = {
 
     let workingOutput = output
     let captureFromFile = false
-    let cleanup: (() => Promise<void>) | undefined
+    let cleanup: CleanupFn | undefined
 
     if (output === '-') {
-      const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'yt-dlp-out-'))
-      workingOutput = path.join(tmpDir, 'audio.%(ext)s')
+      const { dir, cleanup: dirCleanup } = await createTmpDir('yt-dlp-out-')
+      workingOutput = path.join(dir, 'audio.%(ext)s')
       captureFromFile = true
-      cleanup = async () => {
-        await fs.rm(tmpDir, { recursive: true, force: true })
-      }
+      cleanup = dirCleanup
     }
 
     const argv: string[] = []
@@ -223,7 +249,7 @@ const COMMAND_BUILDERS: Record<string, CommandBuilder> = {
     const argv: string[] = []
     let workingInputPath = input
     let workingOutputDir = outputDir === '-' ? '' : outputDir
-    let cleanup: (() => Promise<void>) | undefined
+    let cleanup: CleanupFn | undefined
 
     if (input === '-') {
       if (
@@ -232,26 +258,21 @@ const COMMAND_BUILDERS: Record<string, CommandBuilder> = {
       ) {
         throw new Error('stdin audio required when input is "-"')
       }
-      const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'whisper-in-'))
-      workingInputPath = path.join(tmpDir, 'audio.wav')
-      await fs.writeFile(
-        workingInputPath,
+      const { filePath, cleanup: inputCleanup } = await writeTmpFile(
+        'whisper-in-',
+        '.wav',
         Buffer.isBuffer(stdinValue) || stdinValue instanceof Uint8Array
           ? Buffer.from(stdinValue)
           : Buffer.from(stdinValue)
       )
-      cleanup = async () => {
-        await fs.rm(tmpDir, { recursive: true, force: true })
-      }
+      workingInputPath = filePath
+      cleanup = inputCleanup
     }
 
     if (!workingOutputDir) {
-      workingOutputDir = await fs.mkdtemp(path.join(os.tmpdir(), 'whisper-out-'))
-      const previousCleanup = cleanup
-      cleanup = async () => {
-        await fs.rm(workingOutputDir, { recursive: true, force: true })
-        if (previousCleanup) await previousCleanup()
-      }
+      const { dir, cleanup: outCleanup } = await createTmpDir('whisper-out-')
+      workingOutputDir = dir
+      cleanup = combineCleanups(outCleanup, cleanup)
     }
 
     const expectedBase = path.basename(workingInputPath, path.extname(workingInputPath))
@@ -268,12 +289,7 @@ const COMMAND_BUILDERS: Record<string, CommandBuilder> = {
 
       const vttPath = path.join(searchDir, vttFile)
       const vtt = await fs.readFile(vttPath)
-      const transcript = vtt
-        .toString('utf8')
-        .split(/\r?\n/)
-        .filter((line) => line && !line.startsWith('WEBVTT') && !line.includes('-->') && !/^\d+$/.test(line.trim()))
-        .map((line) => line.trim())
-        .join('\n')
+      const transcript = vttToTranscript(vtt.toString('utf8'))
 
       // Surface normalized outputs for downstream workflows directly from step output
       result.stdout = transcript
@@ -300,21 +316,21 @@ const COMMAND_BUILDERS: Record<string, CommandBuilder> = {
     const input = expectString(args.input || args.arg0, 'input')
     const output = expectString(args.output || args.arg1 || '-', 'output')
     const outputIsStdout = output === '-'
-    const tmpOutput = outputIsStdout ? path.join(os.tmpdir(), `mmdc-${Date.now()}.png`) : output
+    const { dir: mmdcDir, cleanup: mmdcDirCleanup } = outputIsStdout
+      ? await createTmpDir('mmdc-out-')
+      : { dir: path.dirname(output), cleanup: undefined as CleanupFn | undefined }
+    const tmpOutput = outputIsStdout ? path.join(mmdcDir, `mmdc-${Date.now()}.png`) : output
 
     let workingInput = input
-    let cleanup: (() => Promise<void>) | undefined
+    let cleanup: CleanupFn | undefined
 
     if (input === '-') {
       if (!stdinValue || !(typeof stdinValue === 'string' || Buffer.isBuffer(stdinValue))) {
         throw new Error('mmdc requires mermaid stdin when input is "-"')
       }
-      const tmpInput = path.join(os.tmpdir(), `mmdc-${Date.now()}.mmd`)
-      await fs.writeFile(tmpInput, stdinValue)
-      workingInput = tmpInput
-      cleanup = async () => {
-        await fs.rm(tmpInput, { force: true })
-      }
+      const { filePath, cleanup: inputCleanup } = await writeTmpFile('mmdc-in-', '.mmd', stdinValue)
+      workingInput = filePath
+      cleanup = inputCleanup
     }
 
     const argv: string[] = ['--input', workingInput, '--output', tmpOutput, '--outputFormat', 'png']
@@ -329,10 +345,11 @@ const COMMAND_BUILDERS: Record<string, CommandBuilder> = {
           const fileBuf = await fs.readFile(tmpOutput)
           pngBuffer = fileBuf
         } catch (err) {
-          // fall through; will error below if no usable buffer
           pngBuffer = pngBuffer ?? undefined
         } finally {
-          await fs.rm(tmpOutput, { force: true }).catch(() => {})
+          if (outputIsStdout) {
+            await fs.rm(tmpOutput, { force: true }).catch(() => {})
+          }
         }
       }
 
@@ -353,7 +370,7 @@ const COMMAND_BUILDERS: Record<string, CommandBuilder> = {
         ;(result as any).files = { 'diagram.png': pngBuffer }
       }
 
-      if (cleanup) await cleanup()
+      await combineCleanups(cleanup, mmdcDirCleanup)()
     }
 
     return { argv, postProcess, allowStdin: false }
@@ -529,11 +546,11 @@ export async function chooseToolForMention(options: {
 
   await ensureSessionDir(sessionDir)
 
-  const toolLines = Object.fromEntries(TOOLS.map((t) => [t.name, t.callWhen]))
-
-  const context = options.context
-
-  const userInstructions = ['Context: ' + context, 'Prompt: ' + options.prompt].join('\n')
+  const contextText = (options.context || []).filter(Boolean).join('\n\n')
+  const userInstructions = [
+    contextText ? `Context:\n${contextText}` : 'Context: (none)',
+    `Prompt:\n${options.prompt}`
+  ].join('\n\n')
 
   const onStream = (msg: AgentStreamEvent) => {
     if (!options.onProgress) return
@@ -541,7 +558,7 @@ export async function chooseToolForMention(options: {
   }
 
   const response = await runAgentWorkflow(toolsWorkflowDefinition, {
-    user: { instructions: userInstructions, tools: JSON.stringify(toolLines) },
+    user: { instructions: userInstructions, tools: formatToolGuide() },
     model,
     sessionDir,
     workflowId: toolsWorkflowDefinition.id,
@@ -617,7 +634,9 @@ export async function runToolWorkflow<TParsed = unknown>(options: {
     const workflowDef = getToolWorkflowByName(workflowKey)
     if (!workflowDef) throw new Error(`Unknown tool workflow: ${workflowKey}`)
 
-    const sessionDir = path.resolve(process.cwd(), '.tmp', 'tools', workflowKey)
+    const baseSessionDir = options.sessionDir || path.resolve(process.cwd(), '.tmp', 'tools', workflowKey)
+    const sessionDir = path.join(baseSessionDir, `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`)
+
     await fs.mkdir(sessionDir, { recursive: true })
 
     const onStream = (msg: any) => {

@@ -22,7 +22,7 @@ describe('transcribe workflow e2e (real CLIs)', () => {
 
   it('produces VTT base64 and transcript from real youtube audio', async () => {
     const response = await runAgentWorkflow(transcribeWorkflowDefinition, {
-      user: { sourceUrl: VIDEO_URL },
+      user: { url: VIDEO_URL },
       sessionDir,
       workflowId: transcribeWorkflowDefinition.id,
       workflowSource: 'user',
