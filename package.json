@@ -19,6 +19,7 @@
   "dependencies": {
     "@discordjs/opus": "^0.10.0",
     "@discordjs/voice": "^0.19.0",
+    "@hexafield/jsonpath-object-transform": "^2.0.0",
     "@mermaid-js/mermaid-cli": "^11.12.0",
     "@resvg/resvg-js": "^2.6.2",
     "@snazzah/davey": "^0.1.7",

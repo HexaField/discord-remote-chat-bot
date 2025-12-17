@@ -3,8 +3,6 @@ import dotenv from 'dotenv-flow'
 
 dotenv.config({ path: path.resolve(appRootPath.path) })
 
-console.log(process.env.NODE_ENV, process.env.GUILD_ID)
-
 import {
   ApplicationCommandDataResolvable,
   ApplicationCommandOptionType,
@@ -594,8 +592,6 @@ client.on('messageCreate', async (message) => {
       question,
       referenced: referencedForChooser,
       model: ASKQUESTION_CONSTANTS.MODEL,
-      sessionDir: undefined,
-      url: message.attachments.first()?.url ?? message.content.match(/https?:\/\/\S+/)?.[0],
       onProgress
     })
 

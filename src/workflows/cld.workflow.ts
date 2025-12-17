@@ -1,4 +1,10 @@
-import { AgentStreamEvent, runAgentWorkflow, workflow, WorkflowParserJsonOutput, type AgentWorkflowResult } from '@hexafield/agent-workflow'
+import {
+  AgentStreamEvent,
+  runAgentWorkflow,
+  workflow,
+  WorkflowParserJsonOutput,
+  type AgentWorkflowResult
+} from '@hexafield/agent-workflow'
 
 import os from 'node:os'
 

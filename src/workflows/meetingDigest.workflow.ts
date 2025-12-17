@@ -1,4 +1,10 @@
-import { AgentStreamEvent, runAgentWorkflow, workflow, WorkflowParserJsonOutput, type AgentWorkflowResult } from '@hexafield/agent-workflow'
+import {
+  AgentStreamEvent,
+  runAgentWorkflow,
+  workflow,
+  WorkflowParserJsonOutput,
+  type AgentWorkflowResult
+} from '@hexafield/agent-workflow'
 
 import os from 'node:os'
 
@@ -132,12 +138,22 @@ Use empty arrays when a category is missing. No markdown or commentary.`,
         ['Meeting transcript:\n{{user.instructions}}', 'Reference insights if helpful:\n{{steps.insight.raw}}'],
         { next: 'decisions' }
       )
-      .agent('decisions', 'decisions', ['Meeting transcript:\n{{user.instructions}}', 'Action items noted earlier:\n{{steps.actions.raw}}'], {
-        next: 'questions'
-      })
-      .agent('questions', 'questions', ['Meeting transcript:\n{{user.instructions}}', 'Decisions noted earlier:\n{{steps.decisions.raw}}'], {
-        next: 'integrator'
-      })
+      .agent(
+        'decisions',
+        'decisions',
+        ['Meeting transcript:\n{{user.instructions}}', 'Action items noted earlier:\n{{steps.actions.raw}}'],
+        {
+          next: 'questions'
+        }
+      )
+      .agent(
+        'questions',
+        'questions',
+        ['Meeting transcript:\n{{user.instructions}}', 'Decisions noted earlier:\n{{steps.decisions.raw}}'],
+        {
+          next: 'integrator'
+        }
+      )
       .agent(
         'integrator',
         'integrator',

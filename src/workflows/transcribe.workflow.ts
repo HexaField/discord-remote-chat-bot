@@ -23,13 +23,13 @@ export const transcribeWorkflowDocument = workflow('tools.transcribe.v1')
     parser: 'toolResult',
     tools: { webfetch: true, read: true, write: true }
   })
-  .user('sourceUrl', { type: 'string', default: '' })
+  .user('url', { type: 'string', default: '' })
   .round((round) =>
     round
       .start('download')
       .cli('download', 'yt-dlp', {
         argsObject: {
-          url: '{{user.sourceUrl}}',
+          url: '{{user.url}}',
           output: '-',
           audioFormat: 'wav',
           extractAudio: 'true'
