@@ -1,3 +1,10 @@
+import appRootPath from 'app-root-path'
+import dotenv from 'dotenv-flow'
+
+dotenv.config({ path: path.resolve(appRootPath.path) })
+
+console.log(process.env.NODE_ENV, process.env.GUILD_ID)
+
 import {
   ApplicationCommandDataResolvable,
   ApplicationCommandOptionType,
@@ -10,7 +17,6 @@ import {
   Partials,
   TextBasedChannel
 } from 'discord.js'
-import 'dotenv/config'
 import fs from 'fs/promises'
 import path from 'path'
 import {
@@ -27,7 +33,12 @@ import { runToolWorkflow } from './tools'
 import { generateMeetingDigest } from './workflows/meetingDigest.workflow'
 
 const DISCORD_TOKEN: string | undefined = process.env.DISCORD_TOKEN
-const LLM_URL: string | undefined = process.env.LLM_URL
+
+if (!DISCORD_TOKEN) {
+  console.error('Missing DISCORD_TOKEN in environment')
+  process.exit(1)
+}
+
 const RECORDINGS_ROOT = path.resolve(process.cwd(), '.tmp', 'recordings')
 
 const TEXT_ATTACHMENT_EXTENSIONS = new Set(['txt', 'md', 'markdown', 'csv', 'json', 'log', 'yaml', 'yml', 'xml'])
@@ -184,15 +195,6 @@ const serializeAttachments = (attachments: Record<string, string>): string =>
   Object.entries(attachments)
     .map((name, content) => `\`\`\`${name}\n${content}\n\`\`\``)
     .join('\n\n')
-
-if (!DISCORD_TOKEN) {
-  console.error('Missing DISCORD_TOKEN in environment')
-  process.exit(1)
-}
-if (!LLM_URL) {
-  console.error('Missing LLM_URL in environment')
-  process.exit(1)
-}
 
 const client = new Client({
   intents: [
@@ -596,8 +598,6 @@ client.on('messageCreate', async (message) => {
       url: message.attachments.first()?.url ?? message.content.match(/https?:\/\/\S+/)?.[0],
       onProgress
     })
-
-    console.log(toolOutput)
 
     if (toolOutput.tool !== 'none') {
       try {

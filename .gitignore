@@ -1,6 +1,7 @@
 node_modules/
 dist/
 .env
+.env.development
 csvs/
 package-lock.json
 .tmp*

@@ -29,6 +29,7 @@
     "d3": "^7.9.0",
     "discord.js": "^14.13.0",
     "dotenv": "^16.3.1",
+    "dotenv-flow": "^4.1.0",
     "express": "^4.21.2",
     "msgpackr": "^1.11.5",
     "multer": "^2.0.2",
