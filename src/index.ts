@@ -585,8 +585,8 @@ client.on('messageCreate', async (message) => {
     const fullContext = contextParts.join('\n\n')
 
     const toolOutput = await runToolWorkflow({
-      question,
-      referenced: contextParts,
+      prompt: question,
+      context: contextParts,
       model: ASKQUESTION_CONSTANTS.MODEL,
       onProgress
     })

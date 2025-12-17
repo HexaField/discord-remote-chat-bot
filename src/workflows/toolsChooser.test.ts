@@ -17,8 +17,8 @@ describe('tools chooser workflow', () => {
 
   it('selects transcribe when an audio URL is provided', async () => {
     const result = await chooseToolForMention({
-      question: 'Please transcribe this audio: https://example.com/audio.mp3',
-      referenced: { attachments: ['https://example.com/audio.mp3'] },
+      prompt: 'Please transcribe this audio: https://example.com/audio.mp3',
+      context: ['https://example.com/audio.mp3'],
       sessionDir
     })
     expect(result.tool).toBe('transcribe')
@@ -26,10 +26,8 @@ describe('tools chooser workflow', () => {
 
   it('selects diagram for diagram requests with text', async () => {
     const result = await chooseToolForMention({
-      question: 'Create a causal loop diagram of this system.',
-      referenced: {
-        content: 'Increased marketing raises signups, which increases load on support and slows responses.'
-      },
+      prompt: 'Create a causal loop diagram of this system.',
+      context: ['Increased marketing raises signups, which increases load on support and slows responses.'],
       sessionDir
     })
     expect(result.tool).toBe('diagram')
@@ -37,10 +35,8 @@ describe('tools chooser workflow', () => {
 
   it('selects meeting_summarise for meeting summary asks', async () => {
     const result = await chooseToolForMention({
-      question: 'Summarise the meeting notes and list actions.',
-      referenced: {
-        content: 'Team agreed to ship v2 Friday; Alice will update docs; need decision on rollout steps.'
-      },
+      prompt: 'Summarise the meeting notes and list actions.',
+      context: ['Team agreed to ship v2 Friday; Alice will update docs; need decision on rollout steps.'],
       sessionDir
     })
     expect(result.tool).toBe('meeting_summarise')

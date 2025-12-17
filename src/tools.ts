@@ -2,7 +2,6 @@ import {
   AgentStreamEvent,
   AgentWorkflowDefinition,
   extractJson,
-  jsonpathTransform,
   runAgentWorkflow,
   validateWorkflowDefinition,
   WorkflowParserJsonOutput,
@@ -17,7 +16,6 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { cldWorkflowDefinition, cldWorkflowDocument } from './workflows/cld.workflow'
-import { contextTransformWorkflowDefinition } from './workflows/contextTransform.workflow'
 import { diagramWorkflowDocument } from './workflows/diagram.workflow'
 import { meetingDigestWorkflowDocument } from './workflows/meetingDigest.workflow'
 import { transcribeWorkflowDocument } from './workflows/transcribe.workflow'
@@ -56,7 +54,12 @@ export type ToolDef = {
   description: string
   /** workflow registry key to execute for this tool */
   workflow: string
+  /** map prompt/context into tool-specific inputs */
+  mapInputs: (question: string, referenced?: string[]) => Record<string, unknown>
 }
+
+const mergeReferencedText = (referenced?: string[]) =>
+  Array.isArray(referenced) ? referenced.filter(Boolean).join('\n\n') : ''
 
 export const TOOLS: ToolDef[] = [
   {
@@ -65,14 +68,19 @@ export const TOOLS: ToolDef[] = [
     callWhen:
       'Call this when the user supplies or references an audio/video file (upload or URL) and asks for a transcript or asks questions that require transcribing audio/video content.',
     description: 'Upload audio or provide a URL to download video and produce a speaker-aligned transcript.',
-    workflow: 'transcribe'
+    workflow: 'transcribe',
+    mapInputs: (question, referenced) => ({ url: extractFirstUrl([mergeReferencedText(referenced), question]) })
   },
   {
     name: 'diagram',
     title: 'Diagram Generation',
     callWhen: 'Call this when the user asks to produce a diagram.',
     description: 'Turn audio, youtube videos or text content into a causal loop diagram.',
-    workflow: 'diagram'
+    workflow: 'diagram',
+    mapInputs: (question, referenced) => {
+      const referencedText = mergeReferencedText(referenced)
+      return { transcript: referencedText || question }
+    }
   },
   {
     name: 'meeting_summarise',
@@ -80,26 +88,15 @@ export const TOOLS: ToolDef[] = [
     callWhen:
       'Call this when the user asks for a meeting summary, insights, action items, decisions or open questions derived from a meeting transcript or recording.',
     description: 'Generate meeting digest: insights, action items, decisions, open questions.',
-    workflow: 'meeting_summarise'
+    workflow: 'meeting_summarise',
+    mapInputs: (question, referenced) => {
+      const referencedText = mergeReferencedText(referenced)
+      return { instructions: referencedText || question }
+    }
   }
 ]
 
 export const TOOL_NAMES = TOOLS.map((t) => t.name)
-
-const TOOL_INPUT_TARGETS: Record<string, { target: Record<string, unknown>; notes: string }> = {
-  transcribe: {
-    target: { url: '' },
-    notes: 'Single downloadable HTTP(S) URL to audio/video content.'
-  },
-  diagram: {
-    target: { transcript: '' },
-    notes: 'Long-form text or transcript used to build the causal diagram.'
-  },
-  meeting_summarise: {
-    target: { instructions: '' },
-    notes: 'Meeting transcript or notes as one combined string.'
-  }
-}
 
 const DEFAULT_MODEL = process.env.TOOLS_MODEL || 'github-copilot/gpt-5-mini'
 const DEFAULT_SESSION_DIR = path.resolve(appRootPath.path, '.tmp', 'tools-sessions')
@@ -129,14 +126,6 @@ const pruneEmpty = (value: unknown): any => {
   return value
 }
 
-const safeStringify = (value: unknown) => {
-  try {
-    return JSON.stringify(value, null, 2)
-  } catch {
-    return ''
-  }
-}
-
 const stripTrailingPunctuation = (value: string) => value.replace(/[)\].,]+$/g, '')
 
 const extractFirstUrl = (sources: Array<string | string[] | undefined | null>): string | undefined => {
@@ -155,132 +144,6 @@ const extractFirstUrl = (sources: Array<string | string[] | undefined | null>): 
     if (match?.[0]) return stripTrailingPunctuation(match[0])
   }
   return undefined
-}
-
-const applyJsonpathTemplate = (context: Record<string, unknown>, template: unknown): Record<string, unknown> => {
-  if (!template) return {}
-
-  let parsedTemplate: Record<string, unknown> | undefined
-
-  if (typeof template === 'string') {
-    try {
-      parsedTemplate = JSON.parse(template)
-    } catch {
-      return {}
-    }
-  } else if (typeof template === 'object') {
-    parsedTemplate = template as Record<string, unknown>
-  }
-
-  if (!parsedTemplate) return {}
-
-  try {
-    const transformed = jsonpathTransform(context, parsedTemplate)
-    const cleaned = pruneEmpty(transformed)
-    return cleaned && typeof cleaned === 'object' ? cleaned : {}
-  } catch (err) {
-    console.error('Failed to apply context transform', err)
-    return {}
-  }
-}
-
-const ensureToolInputDefaults = (
-  tool: string,
-  contextEnvelope: { context?: Record<string, any> },
-  current: Record<string, unknown>,
-  target?: Record<string, unknown>
-) => {
-  const output: Record<string, unknown> = { ...(current || {}) }
-  const context = (contextEnvelope?.context || {}) as Record<string, any>
-  const referenced = (context.referenced || {}) as { content?: string; attachments?: string[] }
-  const targetKeys = target ? Object.keys(target) : []
-
-  if (targetKeys.includes('transcript') && !output.transcript) {
-    output.transcript = referenced.content || context.question || ''
-  }
-
-  if (targetKeys.includes('instructions') && !output.instructions) {
-    output.instructions = referenced.content || context.question || ''
-  }
-
-  if (targetKeys.includes('url') && !output.url) {
-    const url = extractFirstUrl([
-      referenced.attachments,
-      referenced.content,
-      typeof context.question === 'string' ? context.question : undefined
-    ])
-    if (url) output.url = url
-  }
-
-  return (pruneEmpty(output) as Record<string, unknown>) || {}
-}
-
-export async function buildToolInputsForContext(
-  tool: string,
-  question: string,
-  referenced?: string[],
-  opts: { model?: string; sessionDir?: string; onProgress?: (m: string) => void; toolDef?: ToolDef } = {}
-): Promise<{ inputs: Record<string, unknown>; transform?: Record<string, unknown>; target?: Record<string, unknown> }> {
-  const targetShape = TOOL_INPUT_TARGETS[tool]?.target
-  const context = (pruneEmpty({
-    question,
-    referenced,
-    tool: {
-      name: tool,
-      title: opts.toolDef?.title,
-      description: opts.toolDef?.description,
-      callWhen: opts.toolDef?.callWhen
-    },
-    targetNotes: TOOL_INPUT_TARGETS[tool]?.notes
-  }) || {}) as Record<string, unknown>
-
-  const contextEnvelope = { context }
-
-  if (!targetShape) {
-    const fallback = ensureToolInputDefaults(tool, contextEnvelope, {}, targetShape)
-    return { inputs: fallback, target: targetShape }
-  }
-
-  const model = opts.model || DEFAULT_MODEL
-  const sessionDir = opts.sessionDir || path.resolve(process.cwd(), '.tmp', 'tools', 'context-transform')
-  await fs.mkdir(sessionDir, { recursive: true })
-
-  const onStream = (msg: AgentStreamEvent) => {
-    if (!opts.onProgress) return
-    if (msg.step === 'mapper') opts.onProgress('[Tools] Building tool input transform...')
-  }
-
-  opts.onProgress?.('[Tools] Deriving context transform...')
-
-  let transformTemplate: Record<string, unknown> | undefined
-
-  try {
-    const response = await runAgentWorkflow(contextTransformWorkflowDefinition, {
-      user: {
-        context: safeStringify(contextEnvelope),
-        target: safeStringify(targetShape),
-        tool
-      },
-      model,
-      sessionDir,
-      workflowId: contextTransformWorkflowDefinition.id,
-      workflowSource: 'user',
-      workflowLabel: contextTransformWorkflowDefinition.description,
-      onStream
-    })
-
-    const result = await response.result
-    const lastRound = result.rounds[result.rounds.length - 1]
-    const parsed = lastRound?.steps?.mapper?.parsed as { transform?: Record<string, unknown> } | undefined
-    transformTemplate = parsed?.transform
-  } catch (err) {
-    console.error('Context transform workflow failed', err)
-  }
-
-  const mapped = transformTemplate ? applyJsonpathTemplate(contextEnvelope, transformTemplate) : {}
-  const inputs = ensureToolInputDefaults(tool, contextEnvelope, mapped, targetShape)
-
-  return { inputs, transform: transformTemplate, target: targetShape }
 }
 
 const expectString = (value: unknown, label: string): string => {
@@ -654,8 +517,8 @@ const extractToolsOutput = (result: ToolsWorkflowResult): ToolsParserOutput | un
 }
 
 export async function chooseToolForMention(options: {
-  question: string
-  referenced?: string[]
+  prompt: string
+  context?: string[]
   sessionId?: string
   sessionDir?: string
   model?: string
@@ -668,9 +531,9 @@ export async function chooseToolForMention(options: {
 
   const toolLines = Object.fromEntries(TOOLS.map((t) => [t.name, t.callWhen]))
 
-  const referencedText = options.referenced
+  const context = options.context
 
-  const userInstructions = ['Context: ' + referencedText, 'Question: ' + options.question].join('\n')
+  const userInstructions = ['Context: ' + context, 'Prompt: ' + options.prompt].join('\n')
 
   const onStream = (msg: AgentStreamEvent) => {
     if (!options.onProgress) return
@@ -719,35 +582,36 @@ export async function chooseToolForMention(options: {
 }
 
 export async function runToolWorkflow<TParsed = unknown>(options: {
-  question: string
-  referenced?: string[]
+  prompt: string
+  context?: string[]
   model?: string
   sessionDir?: string
   onProgress?: (m: string) => void
 }): Promise<{ tool: string; result?: any; parsed?: TParsed; sessionDir?: string }> {
+  console.log({ prompt: options.prompt, context: options.context })
   const chooser = await chooseToolForMention({
-    question: options.question,
-    referenced: options.referenced,
+    prompt: options.prompt,
+    context: options.context,
     model: options.model,
     sessionDir: options.sessionDir,
     onProgress: options.onProgress
   })
 
   const tool = chooser?.tool || 'none'
+  console.log({ tool })
   if (!tool || tool === 'none') return { tool }
 
   options.onProgress?.(`[Tools] Selected tool: ${tool}`)
 
   // Find tool registry entry to determine workflow mapping
   const toolDef = TOOLS.find((t) => t.name === tool)
-  const workflowKey = toolDef?.workflow || tool
+  if (!toolDef) throw new Error(`Unknown tool: ${tool}`)
 
-  const { inputs } = await buildToolInputsForContext(workflowKey, options.question, options.referenced, {
-    model: options.model,
-    sessionDir: options.sessionDir,
-    onProgress: options.onProgress,
-    toolDef
-  })
+  const workflowKey = toolDef.workflow
+
+  const mapped = toolDef.mapInputs(options.prompt, options.context)
+
+  const inputs = pruneEmpty(mapped) as Record<string, unknown>
 
   try {
     const workflowDef = getToolWorkflowByName(workflowKey)
@@ -779,6 +643,7 @@ export async function runToolWorkflow<TParsed = unknown>(options: {
     })
 
     const result = await response.result
+    console.dir({ inputs, result }, { depth: 8 })
     const lastRound = result.rounds[result.rounds.length - 1]
     const stepKeys = lastRound?.steps ? Object.keys(lastRound.steps) : []
     const lastStep = stepKeys.length ? lastRound.steps[stepKeys[stepKeys.length - 1]] : undefined
