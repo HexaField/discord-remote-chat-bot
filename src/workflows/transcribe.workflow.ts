@@ -46,10 +46,6 @@ export const transcribeWorkflowDocument = workflow('tools.transcribe.v1')
       .transform(
         'emit',
         {
-          files: {
-            'audio.vtt': '$.steps.transcribe.parsed.stdoutBuffer',
-            'transcript.txt': '$.steps.transcribe.parsed.stdout'
-          },
           response: '$.steps.transcribe.parsed.stdout'
         },
         { exits: [{ condition: 'always', outcome: 'completed', reason: 'transcription complete' }] }

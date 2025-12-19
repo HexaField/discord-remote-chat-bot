@@ -605,7 +605,6 @@ export async function runToolWorkflow<TParsed = unknown>(options: {
   sessionDir?: string
   onProgress?: (m: string) => void
 }): Promise<{ tool: string; result?: any; parsed?: TParsed; sessionDir?: string }> {
-  console.log({ prompt: options.prompt, context: options.context })
   const chooser = await chooseToolForMention({
     prompt: options.prompt,
     context: options.context,
@@ -615,7 +614,6 @@ export async function runToolWorkflow<TParsed = unknown>(options: {
   })
 
   const tool = chooser?.tool || 'none'
-  console.log({ tool })
   if (!tool || tool === 'none') return { tool }
 
   options.onProgress?.(`[Tools] Selected tool: ${tool}`)
@@ -662,7 +660,6 @@ export async function runToolWorkflow<TParsed = unknown>(options: {
     })
 
     const result = await response.result
-    console.dir({ inputs, result }, { depth: 8 })
     const lastRound = result.rounds[result.rounds.length - 1]
     const stepKeys = lastRound?.steps ? Object.keys(lastRound.steps) : []
     const lastStep = stepKeys.length ? lastRound.steps[stepKeys[stepKeys.length - 1]] : undefined
